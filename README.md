@@ -228,13 +228,6 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 - The Microsoft 365 security community
 - Thanks to ITEngineer-0815, M0nk3yOo, ozsaid, boscorelly, and Mateusz Jagiello for their contributions and issue reports
 
-## Support
-
-For issues, questions, or suggestions:
-- [Open an Issue](https://github.com/mohammedsiddiqui6872/CIS-Microsoft-365-Foundations-Benchmark/issues)
-- [Start a Discussion](https://github.com/mohammedsiddiqui6872/CIS-Microsoft-365-Foundations-Benchmark/discussions)
-- [PowerShellNerd](https://powershellnerd.com)
-
 ---
 
 **If you find this tool helpful, please consider giving it a star!**
