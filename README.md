@@ -33,7 +33,7 @@ A comprehensive PowerShell module that audits your Microsoft 365 environment aga
 - **Security hardened** - Removed `-Force -AllowClobber`, removed hardcoded ClientId, environment variable cleanup
 - **No more side effects on import** - Dependencies checked at connect time, not module import
 - **Sovereign cloud support** - SharePoint URL validation now accepts `.sharepoint.us`, `.sharepoint.de`, `.sharepoint.cn`
-- **Get-CISBenchmarkControl** fully populated with all 140 controls
+- **Get-CISM365BenchmarkControl** fully populated with all 140 controls
 - **Teams connection non-fatal** - If Teams fails to connect, remaining 8 sections still run
 
 **v3.0.5 - Fix False Positive on onmicrosoft.com Domains (Issue #9)**
@@ -43,7 +43,7 @@ A comprehensive PowerShell module that audits your Microsoft 365 environment aga
 
 - **140 Compliance Controls** across all M365 services
 - **66% Fully Automated** - 92 controls run automatically via Microsoft Graph API
-- **Zero-Parameter Authentication** - `Connect-CISBenchmark` for easy setup
+- **Zero-Parameter Authentication** - `Connect-CISM365Benchmark` for easy setup
 - **Dual Report Format** - Professional HTML and CSV reports with floating action buttons
 - **Profile-based Filtering** - Check L1, L2, or All controls
 - **Secure Authentication** - Modern OAuth 2.0 with persistent token caching
@@ -123,27 +123,27 @@ Your account needs the following permissions:
 ```powershell
 # Quick start - 3 steps
 Import-Module CIS-M365-Benchmark
-Connect-CISBenchmark
-Invoke-CISBenchmark
+Connect-CISM365Benchmark
+Invoke-CISM365Benchmark
 
 # Specify tenant manually
-Invoke-CISBenchmark `
+Invoke-CISM365Benchmark `
     -TenantDomain "contoso.onmicrosoft.com" `
     -SharePointAdminUrl "https://contoso-admin.sharepoint.com"
 
 # Check only L1 or L2 controls
-Invoke-CISBenchmark -ProfileLevel "L1"
-Invoke-CISBenchmark -ProfileLevel "L2"
+Invoke-CISM365Benchmark -ProfileLevel "L1"
+Invoke-CISM365Benchmark -ProfileLevel "L2"
 
 # Custom output directory
-Invoke-CISBenchmark -OutputPath "C:\CIS-Reports"
+Invoke-CISM365Benchmark -OutputPath "C:\CIS-Reports"
 
 # Device code authentication (headless/remote sessions)
-Connect-CISBenchmark -UseDeviceCode
-Invoke-CISBenchmark
+Connect-CISM365Benchmark -UseDeviceCode
+Invoke-CISM365Benchmark
 
 # Full example with all parameters
-Invoke-CISBenchmark `
+Invoke-CISM365Benchmark `
     -TenantDomain "contoso.onmicrosoft.com" `
     -SharePointAdminUrl "https://contoso-admin.sharepoint.com" `
     -ProfileLevel "All" `
@@ -151,13 +151,13 @@ Invoke-CISBenchmark `
     -Verbose
 
 # Look up a specific control
-Get-CISBenchmarkControl -ControlNumber "5.2.2.1"
+Get-CISM365BenchmarkControl -ControlNumber "5.2.2.1"
 
 # Check prerequisites and module versions
-Test-CISBenchmarkPrerequisites
+Test-CISM365BenchmarkPrerequisites
 
 # Module info
-Get-CISBenchmarkInfo
+Get-CISM365BenchmarkInfo
 ```
 
 ## Output Reports
@@ -177,11 +177,11 @@ Get-CISBenchmarkInfo
 
 ## Troubleshooting
 
-**Issue: "Connect-CISBenchmark is not recognized"**
+**Issue: "Connect-CISM365Benchmark is not recognized"**
 - Install the latest version: `Install-Module -Name CIS-M365-Benchmark -Scope CurrentUser -Force`
 
 **Issue: Authentication browser window doesn't open**
-- Use device code authentication: `Connect-CISBenchmark -UseDeviceCode`
+- Use device code authentication: `Connect-CISM365Benchmark -UseDeviceCode`
 
 **Issue: Multiple sign-in prompts**
 - Normal. Each M365 service (Graph, Exchange, SharePoint, Teams) may prompt separately.
@@ -224,7 +224,13 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 ## Acknowledgments
 
 - Thanks to ITEngineer-0815, M0nk3yOo, ozsaid, boscorelly, and Mateusz Jagiello for their contributions and issue reports
-- Special Thanks to **Mateusz Jagiello** For his relentless checks. 
+- Special Thanks to **Mateusz Jagiello** For his relentless checks.
+
+## Support
+
+For issues, questions, or suggestions:
+- [Open an Issue](https://github.com/mohammedsiddiqui6872/CIS-Microsoft-365-Foundations-Benchmark/issues)
+- [Start a Discussion](https://github.com/mohammedsiddiqui6872/CIS-Microsoft-365-Foundations-Benchmark/discussions)
 
 ---
 

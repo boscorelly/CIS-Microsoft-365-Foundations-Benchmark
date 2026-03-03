@@ -12,6 +12,20 @@ function Script:Install-PrerequisitesAutomatically {
         @{ Name = "MicrosoftTeams"; MinVersion = $null }
     )
 
+    # Optional module for Power BI / Fabric automation (Section 9)
+    $optionalPBI = Get-Module -ListAvailable -Name MicrosoftPowerBIMgmt.Profile -ErrorAction SilentlyContinue
+    if (-not $optionalPBI) {
+        Write-Host "[Optional] Installing MicrosoftPowerBIMgmt.Profile for Power BI automation (Section 9)..." -ForegroundColor Cyan
+        try {
+            Install-Module -Name MicrosoftPowerBIMgmt.Profile -Scope CurrentUser -Force -SkipPublisherCheck -ErrorAction Stop -WarningAction SilentlyContinue | Out-Null
+            Write-Host "  MicrosoftPowerBIMgmt.Profile installed successfully" -ForegroundColor Green
+        }
+        catch {
+            Write-Host "  [Optional] Could not auto-install MicrosoftPowerBIMgmt.Profile: $_" -ForegroundColor DarkYellow
+            Write-Host "  Section 9 (Power BI) controls will remain Manual" -ForegroundColor DarkYellow
+        }
+    }
+
     $missing = @()
     $needsUpdate = @()
     $needsImport = @()
@@ -63,7 +77,7 @@ function Script:Install-PrerequisitesAutomatically {
                         }
 
                     Write-Host "    Installing latest Microsoft.Graph..." -NoNewline -ForegroundColor Gray
-                    Install-Module -Name "Microsoft.Graph" -Scope CurrentUser -Scope CurrentUser -ErrorAction Stop -WarningAction SilentlyContinue | Out-Null
+                    Install-Module -Name "Microsoft.Graph" -Scope CurrentUser -ErrorAction Stop -WarningAction SilentlyContinue | Out-Null
                     Write-Host " [OK]" -ForegroundColor Green
                     Write-Host "  Microsoft.Graph update complete" -ForegroundColor Green
                     $needsImport += $module.Name
@@ -80,7 +94,7 @@ function Script:Install-PrerequisitesAutomatically {
                 }
                 catch {
                     try {
-                        Install-Module -Name $module.Name -Scope CurrentUser -Scope CurrentUser -ErrorAction Stop -WarningAction SilentlyContinue | Out-Null
+                        Install-Module -Name $module.Name -Scope CurrentUser -ErrorAction Stop -WarningAction SilentlyContinue | Out-Null
                         Write-Host " [REINSTALLED]" -ForegroundColor Green
                         $needsImport += $module.Name
                     }
@@ -182,7 +196,7 @@ function Script:Fix-MicrosoftGraphVersion {
                 Write-Host "  Microsoft.Graph updated successfully!" -ForegroundColor Green
                 Write-Host "================================================================" -ForegroundColor Green
                 Write-Host ""
-                Write-Host "Please restart PowerShell and run Invoke-CISBenchmark again." -ForegroundColor Yellow
+                Write-Host "Please restart PowerShell and run Invoke-CISM365Benchmark again." -ForegroundColor Yellow
                 Write-Host ""
                 return $true
             }
@@ -202,10 +216,10 @@ function Script:Fix-MicrosoftGraphVersion {
     return $false
 }
 
-# Prerequisites are now checked on first Connect-CISBenchmark call instead of module import
+# Prerequisites are now checked on first Connect-CISM365Benchmark call instead of module import
 # This prevents unwanted side effects when simply importing the module
 
-function Connect-CISBenchmark {
+function Connect-CISM365Benchmark {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory=$false)]
@@ -252,7 +266,7 @@ function Connect-CISBenchmark {
             if ($missingScopes) {
                 Write-Host "`nMissing required scopes. Reconnecting..." -ForegroundColor Yellow
             } else {
-                Write-Host "`nYou can now run: Invoke-CISBenchmark`n" -ForegroundColor Yellow
+                Write-Host "`nYou can now run: Invoke-CISM365Benchmark`n" -ForegroundColor Yellow
                 return $currentContext
             }
         }
@@ -340,10 +354,10 @@ function Connect-CISBenchmark {
                 Write-Host "This is a known compatibility issue with Microsoft.Graph module in PowerShell 7." -ForegroundColor Yellow
                 Write-Host "`nWorkarounds:" -ForegroundColor Cyan
                 Write-Host "1. Use PowerShell 5.1 instead (recommended):" -ForegroundColor White
-                Write-Host "   powershell.exe -Command `"Import-Module CIS-M365-Benchmark; Connect-CISBenchmark`"" -ForegroundColor Gray
+                Write-Host "   powershell.exe -Command `"Import-Module CIS-M365-Benchmark; Connect-CISM365Benchmark`"" -ForegroundColor Gray
                 Write-Host "`n2. Or manually authenticate first:" -ForegroundColor White
                 Write-Host "   Connect-MgGraph -Scopes 'Directory.Read.All','Policy.Read.All','User.Read.All'" -ForegroundColor Gray
-                Write-Host "   Then run: Invoke-CISBenchmark" -ForegroundColor Gray
+                Write-Host "   Then run: Invoke-CISM365Benchmark" -ForegroundColor Gray
 
                 throw "Unable to authenticate with Microsoft Graph in PowerShell 7. See workarounds above."
             }
@@ -364,7 +378,7 @@ function Connect-CISBenchmark {
             Write-Host "`nSuccessfully connected to Microsoft Graph!" -ForegroundColor Green
             Write-Host "  Tenant ID: $($context.TenantId)" -ForegroundColor White
             Write-Host "  Account: $($context.Account)" -ForegroundColor White
-            Write-Host "`nYou can now run: Invoke-CISBenchmark`n" -ForegroundColor Yellow
+            Write-Host "`nYou can now run: Invoke-CISM365Benchmark`n" -ForegroundColor Yellow
             return $context
         }
         else {
@@ -383,7 +397,7 @@ function Connect-CISBenchmark {
     }
 }
 
-function Invoke-CISBenchmark {
+function Invoke-CISM365Benchmark {
     [CmdletBinding()]
     [OutputType([PSCustomObject])]
     param(
@@ -400,14 +414,7 @@ function Invoke-CISBenchmark {
 
         [Parameter(Mandatory=$false)]
         [ValidateSet('L1','L2','All')]
-        [string]$ProfileLevel = 'All',
-
-        [Parameter(Mandatory=$false)]
-        [ValidateSet('Both','HTML','CSV')]
-        [string]$Format = 'Both',
-
-        [Parameter(Mandatory=$false)]
-        [string[]]$Sections
+        [string]$ProfileLevel = 'All'
     )
 
     begin {
@@ -429,12 +436,12 @@ function Invoke-CISBenchmark {
                     Write-Host ""
                     Write-Host "Not authenticated to Microsoft Graph." -ForegroundColor Yellow
                     Write-Host ""
-                    Write-Host "Please run: Connect-CISBenchmark" -ForegroundColor Cyan
+                    Write-Host "Please run: Connect-CISM365Benchmark" -ForegroundColor Cyan
                     Write-Host ""
                     Write-Host "Attempting automatic authentication..." -ForegroundColor Yellow
 
                     try {
-                        Connect-MgGraph -Scopes "Organization.Read.All","Directory.Read.All" -ErrorAction Stop | Out-Null
+                        Connect-MgGraph -Scopes "Organization.Read.All","Directory.Read.All","Policy.Read.All","UserAuthenticationMethod.Read.All","RoleManagement.Read.All","User.Read.All","Group.Read.All","Application.Read.All","DeviceManagementConfiguration.Read.All","DeviceManagementServiceConfig.Read.All" -ErrorAction Stop | Out-Null
                         $graphContext = Get-MgContext
                         Write-Host "Authentication successful!" -ForegroundColor Green
                     }
@@ -445,12 +452,12 @@ function Invoke-CISBenchmark {
                         Write-Host "================================================================" -ForegroundColor Red
                         Write-Host ""
                         Write-Host "Please authenticate first by running:" -ForegroundColor Yellow
-                        Write-Host "  Connect-CISBenchmark" -ForegroundColor Cyan
+                        Write-Host "  Connect-CISM365Benchmark" -ForegroundColor Cyan
                         Write-Host ""
                         Write-Host "Or provide tenant information manually:" -ForegroundColor Yellow
-                        Write-Host "  Invoke-CISBenchmark -TenantDomain 'tenant.onmicrosoft.com' -SharePointAdminUrl 'https://tenant-admin.sharepoint.com'" -ForegroundColor Cyan
+                        Write-Host "  Invoke-CISM365Benchmark -TenantDomain 'tenant.onmicrosoft.com' -SharePointAdminUrl 'https://tenant-admin.sharepoint.com'" -ForegroundColor Cyan
                         Write-Host ""
-                        throw "Authentication required. Run Connect-CISBenchmark first or provide tenant parameters manually."
+                        throw "Authentication required. Run Connect-CISM365Benchmark first or provide tenant parameters manually."
                     }
                 }
                 else {
@@ -484,12 +491,12 @@ function Invoke-CISBenchmark {
                 Write-Host "Failed to auto-detect tenant information: $_" -ForegroundColor Red
                 Write-Host ""
                 Write-Host "Please authenticate first:" -ForegroundColor Yellow
-                Write-Host "  Connect-CISBenchmark" -ForegroundColor Cyan
+                Write-Host "  Connect-CISM365Benchmark" -ForegroundColor Cyan
                 Write-Host ""
                 Write-Host "Or provide the tenant information manually:" -ForegroundColor Yellow
-                Write-Host "  Invoke-CISBenchmark -TenantDomain 'tenant.onmicrosoft.com' -SharePointAdminUrl 'https://tenant-admin.sharepoint.com'" -ForegroundColor Cyan
+                Write-Host "  Invoke-CISM365Benchmark -TenantDomain 'tenant.onmicrosoft.com' -SharePointAdminUrl 'https://tenant-admin.sharepoint.com'" -ForegroundColor Cyan
                 Write-Host ""
-                throw "Auto-detection failed. Run Connect-CISBenchmark or provide tenant parameters manually."
+                throw "Auto-detection failed. Run Connect-CISM365Benchmark or provide tenant parameters manually."
             }
         }
 
@@ -521,6 +528,10 @@ function Invoke-CISBenchmark {
             }
 
             Write-Verbose "Executing CIS compliance checker script..."
+
+            if (-not (Test-Path -Path $Script:ComplianceCheckerPath)) {
+                throw "Compliance checker script not found at: $($Script:ComplianceCheckerPath). Please reinstall the module."
+            }
 
             & $Script:ComplianceCheckerPath @scriptParams
 
@@ -580,7 +591,7 @@ function Invoke-CISBenchmark {
     }
 }
 
-function Get-CISBenchmarkControl {
+function Get-CISM365BenchmarkControl {
     [CmdletBinding(DefaultParameterSetName='All')]
     [OutputType([PSCustomObject[]])]
     param(
@@ -600,16 +611,16 @@ function Get-CISBenchmarkControl {
         [PSCustomObject]@{ControlNumber="1.1.1"; Title="Ensure Administrative accounts are cloud-only"; Section="1"; ProfileLevel="L1"; Automated=$true}
         [PSCustomObject]@{ControlNumber="1.1.2"; Title="Ensure two emergency access accounts have been defined"; Section="1"; ProfileLevel="L1"; Automated=$false}
         [PSCustomObject]@{ControlNumber="1.1.3"; Title="Ensure that between two and four global admins are designated"; Section="1"; ProfileLevel="L1"; Automated=$true}
-        [PSCustomObject]@{ControlNumber="1.1.4"; Title="Ensure administrative accounts use licenses with a reduced application footprint"; Section="1"; ProfileLevel="L1"; Automated=$false}
+        [PSCustomObject]@{ControlNumber="1.1.4"; Title="Ensure administrative accounts use licenses with a reduced application footprint"; Section="1"; ProfileLevel="L1"; Automated=$true}
         [PSCustomObject]@{ControlNumber="1.2.1"; Title="Ensure that only organizationally managed/approved public groups exist"; Section="1"; ProfileLevel="L2"; Automated=$true}
         [PSCustomObject]@{ControlNumber="1.2.2"; Title="Ensure sign-in to shared mailboxes is blocked"; Section="1"; ProfileLevel="L1"; Automated=$true}
         [PSCustomObject]@{ControlNumber="1.3.1"; Title="Ensure the 'Password expiration policy' is set to 'Set passwords to never expire'"; Section="1"; ProfileLevel="L1"; Automated=$true}
-        [PSCustomObject]@{ControlNumber="1.3.2"; Title="Ensure 'Idle session timeout' is set to '3 hours (or less)' for unmanaged devices"; Section="1"; ProfileLevel="L2"; Automated=$false}
+        [PSCustomObject]@{ControlNumber="1.3.2"; Title="Ensure 'Idle session timeout' is set to '3 hours (or less)' for unmanaged devices"; Section="1"; ProfileLevel="L2"; Automated=$true}
         [PSCustomObject]@{ControlNumber="1.3.3"; Title="Ensure 'External sharing' of calendars is not available"; Section="1"; ProfileLevel="L2"; Automated=$false}
-        [PSCustomObject]@{ControlNumber="1.3.4"; Title="Ensure 'User owned apps and services' is restricted"; Section="1"; ProfileLevel="L1"; Automated=$false}
-        [PSCustomObject]@{ControlNumber="1.3.5"; Title="Ensure internal phishing protection for Forms is enabled"; Section="1"; ProfileLevel="L1"; Automated=$false}
+        [PSCustomObject]@{ControlNumber="1.3.4"; Title="Ensure 'User owned apps and services' is restricted"; Section="1"; ProfileLevel="L1"; Automated=$true}
+        [PSCustomObject]@{ControlNumber="1.3.5"; Title="Ensure internal phishing protection for Forms is enabled"; Section="1"; ProfileLevel="L1"; Automated=$true}
         [PSCustomObject]@{ControlNumber="1.3.6"; Title="Ensure the customer lockbox feature is enabled"; Section="1"; ProfileLevel="L2"; Automated=$false}
-        [PSCustomObject]@{ControlNumber="1.3.7"; Title="Ensure 'third-party storage services' are restricted in 'Microsoft 365 on the web'"; Section="1"; ProfileLevel="L2"; Automated=$false}
+        [PSCustomObject]@{ControlNumber="1.3.7"; Title="Ensure 'third-party storage services' are restricted in 'Microsoft 365 on the web'"; Section="1"; ProfileLevel="L2"; Automated=$true}
         [PSCustomObject]@{ControlNumber="1.3.8"; Title="Ensure that Sways cannot be shared with people outside of your organization"; Section="1"; ProfileLevel="L2"; Automated=$false}
         [PSCustomObject]@{ControlNumber="1.3.9"; Title="Ensure shared bookings pages are restricted to select users"; Section="1"; ProfileLevel="L1"; Automated=$false}
         [PSCustomObject]@{ControlNumber="2.1.1"; Title="Ensure Safe Links for Office Applications is Enabled"; Section="2"; ProfileLevel="L2"; Automated=$true}
@@ -626,57 +637,57 @@ function Get-CISBenchmarkControl {
         [PSCustomObject]@{ControlNumber="2.1.12"; Title="Ensure the connection filter IP allow list is not used"; Section="2"; ProfileLevel="L1"; Automated=$true}
         [PSCustomObject]@{ControlNumber="2.1.13"; Title="Ensure the connection filter safe list is off"; Section="2"; ProfileLevel="L1"; Automated=$true}
         [PSCustomObject]@{ControlNumber="2.1.14"; Title="Ensure inbound anti-spam policies do not contain allowed domains"; Section="2"; ProfileLevel="L1"; Automated=$true}
-        [PSCustomObject]@{ControlNumber="2.1.15"; Title="Ensure outbound anti-spam message limits are in place"; Section="2"; ProfileLevel="L1"; Automated=$false}
+        [PSCustomObject]@{ControlNumber="2.1.15"; Title="Ensure outbound anti-spam message limits are in place"; Section="2"; ProfileLevel="L1"; Automated=$true}
         [PSCustomObject]@{ControlNumber="2.2.1"; Title="Ensure emergency access account activity is monitored"; Section="2"; ProfileLevel="L1"; Automated=$false}
-        [PSCustomObject]@{ControlNumber="2.4.1"; Title="Ensure Priority account protection is enabled and configured"; Section="2"; ProfileLevel="L1"; Automated=$false}
-        [PSCustomObject]@{ControlNumber="2.4.2"; Title="Ensure Priority accounts have 'Strict protection' presets applied"; Section="2"; ProfileLevel="L1"; Automated=$false}
+        [PSCustomObject]@{ControlNumber="2.4.1"; Title="Ensure Priority account protection is enabled and configured"; Section="2"; ProfileLevel="L1"; Automated=$true}
+        [PSCustomObject]@{ControlNumber="2.4.2"; Title="Ensure Priority accounts have 'Strict protection' presets applied"; Section="2"; ProfileLevel="L1"; Automated=$true}
         [PSCustomObject]@{ControlNumber="2.4.3"; Title="Ensure Microsoft Defender for Cloud Apps is enabled and configured"; Section="2"; ProfileLevel="L2"; Automated=$false}
         [PSCustomObject]@{ControlNumber="2.4.4"; Title="Ensure Zero-hour auto purge for Microsoft Teams is on"; Section="2"; ProfileLevel="L1"; Automated=$true}
         [PSCustomObject]@{ControlNumber="3.1.1"; Title="Ensure Microsoft 365 audit log search is Enabled"; Section="3"; ProfileLevel="L1"; Automated=$true}
         [PSCustomObject]@{ControlNumber="3.2.1"; Title="Ensure DLP policies are enabled"; Section="3"; ProfileLevel="L1"; Automated=$true}
         [PSCustomObject]@{ControlNumber="3.2.2"; Title="Ensure DLP policies are enabled for Microsoft Teams"; Section="3"; ProfileLevel="L1"; Automated=$true}
-        [PSCustomObject]@{ControlNumber="3.3.1"; Title="Ensure Information Protection sensitivity label policies are published"; Section="3"; ProfileLevel="L1"; Automated=$false}
+        [PSCustomObject]@{ControlNumber="3.3.1"; Title="Ensure Information Protection sensitivity label policies are published"; Section="3"; ProfileLevel="L1"; Automated=$true}
         [PSCustomObject]@{ControlNumber="4.1"; Title="Ensure devices without a compliance policy are marked 'not compliant'"; Section="4"; ProfileLevel="L2"; Automated=$true}
         [PSCustomObject]@{ControlNumber="4.2"; Title="Ensure device enrollment for personally owned devices is blocked by default"; Section="4"; ProfileLevel="L2"; Automated=$true}
         [PSCustomObject]@{ControlNumber="5.1.2.1"; Title="Ensure 'Per-user MFA' is disabled"; Section="5"; ProfileLevel="L1"; Automated=$true}
         [PSCustomObject]@{ControlNumber="5.1.2.2"; Title="Ensure third party integrated applications are not allowed"; Section="5"; ProfileLevel="L2"; Automated=$true}
         [PSCustomObject]@{ControlNumber="5.1.2.3"; Title="Ensure 'Restrict non-admin users from creating tenants' is set to 'Yes'"; Section="5"; ProfileLevel="L1"; Automated=$true}
-        [PSCustomObject]@{ControlNumber="5.1.2.4"; Title="Ensure access to the Entra admin center is restricted"; Section="5"; ProfileLevel="L1"; Automated=$false}
+        [PSCustomObject]@{ControlNumber="5.1.2.4"; Title="Ensure access to the Entra admin center is restricted"; Section="5"; ProfileLevel="L1"; Automated=$true}
         [PSCustomObject]@{ControlNumber="5.1.2.5"; Title="Ensure the option to remain signed in is hidden"; Section="5"; ProfileLevel="L2"; Automated=$false}
-        [PSCustomObject]@{ControlNumber="5.1.2.6"; Title="Ensure 'LinkedIn account connections' is disabled"; Section="5"; ProfileLevel="L2"; Automated=$false}
+        [PSCustomObject]@{ControlNumber="5.1.2.6"; Title="Ensure 'LinkedIn account connections' is disabled"; Section="5"; ProfileLevel="L2"; Automated=$true}
         [PSCustomObject]@{ControlNumber="5.1.3.1"; Title="Ensure a dynamic group for guest users is created"; Section="5"; ProfileLevel="L1"; Automated=$true}
-        [PSCustomObject]@{ControlNumber="5.1.3.2"; Title="Ensure users cannot create security groups"; Section="5"; ProfileLevel="L1"; Automated=$false}
-        [PSCustomObject]@{ControlNumber="5.1.4.1"; Title="Ensure the ability to join devices to Entra is restricted"; Section="5"; ProfileLevel="L2"; Automated=$false}
-        [PSCustomObject]@{ControlNumber="5.1.4.2"; Title="Ensure the maximum number of devices per user is limited"; Section="5"; ProfileLevel="L1"; Automated=$false}
-        [PSCustomObject]@{ControlNumber="5.1.4.3"; Title="Ensure the GA role is not added as a local administrator during Entra join"; Section="5"; ProfileLevel="L1"; Automated=$false}
-        [PSCustomObject]@{ControlNumber="5.1.4.4"; Title="Ensure local administrator assignment is limited during Entra join"; Section="5"; ProfileLevel="L1"; Automated=$false}
-        [PSCustomObject]@{ControlNumber="5.1.4.5"; Title="Ensure Local Administrator Password Solution is enabled"; Section="5"; ProfileLevel="L1"; Automated=$false}
-        [PSCustomObject]@{ControlNumber="5.1.4.6"; Title="Ensure users are restricted from recovering BitLocker keys"; Section="5"; ProfileLevel="L2"; Automated=$false}
+        [PSCustomObject]@{ControlNumber="5.1.3.2"; Title="Ensure users cannot create security groups"; Section="5"; ProfileLevel="L1"; Automated=$true}
+        [PSCustomObject]@{ControlNumber="5.1.4.1"; Title="Ensure the ability to join devices to Entra is restricted"; Section="5"; ProfileLevel="L2"; Automated=$true}
+        [PSCustomObject]@{ControlNumber="5.1.4.2"; Title="Ensure the maximum number of devices per user is limited"; Section="5"; ProfileLevel="L1"; Automated=$true}
+        [PSCustomObject]@{ControlNumber="5.1.4.3"; Title="Ensure the GA role is not added as a local administrator during Entra join"; Section="5"; ProfileLevel="L1"; Automated=$true}
+        [PSCustomObject]@{ControlNumber="5.1.4.4"; Title="Ensure local administrator assignment is limited during Entra join"; Section="5"; ProfileLevel="L1"; Automated=$true}
+        [PSCustomObject]@{ControlNumber="5.1.4.5"; Title="Ensure Local Administrator Password Solution is enabled"; Section="5"; ProfileLevel="L1"; Automated=$true}
+        [PSCustomObject]@{ControlNumber="5.1.4.6"; Title="Ensure users are restricted from recovering BitLocker keys"; Section="5"; ProfileLevel="L2"; Automated=$true}
         [PSCustomObject]@{ControlNumber="5.1.5.1"; Title="Ensure user consent to apps accessing company data on their behalf is not allowed"; Section="5"; ProfileLevel="L2"; Automated=$true}
-        [PSCustomObject]@{ControlNumber="5.1.5.2"; Title="Ensure the admin consent workflow is enabled"; Section="5"; ProfileLevel="L1"; Automated=$false}
-        [PSCustomObject]@{ControlNumber="5.1.6.1"; Title="Ensure that collaboration invitations are sent to allowed domains only"; Section="5"; ProfileLevel="L2"; Automated=$false}
+        [PSCustomObject]@{ControlNumber="5.1.5.2"; Title="Ensure the admin consent workflow is enabled"; Section="5"; ProfileLevel="L1"; Automated=$true}
+        [PSCustomObject]@{ControlNumber="5.1.6.1"; Title="Ensure that collaboration invitations are sent to allowed domains only"; Section="5"; ProfileLevel="L2"; Automated=$true}
         [PSCustomObject]@{ControlNumber="5.1.6.2"; Title="Ensure that guest user access is restricted"; Section="5"; ProfileLevel="L1"; Automated=$true}
         [PSCustomObject]@{ControlNumber="5.1.6.3"; Title="Ensure guest user invitations are limited to the Guest Inviter role"; Section="5"; ProfileLevel="L2"; Automated=$true}
-        [PSCustomObject]@{ControlNumber="5.1.8.1"; Title="Ensure that password hash sync is enabled for hybrid deployments"; Section="5"; ProfileLevel="L1"; Automated=$false}
+        [PSCustomObject]@{ControlNumber="5.1.8.1"; Title="Ensure that password hash sync is enabled for hybrid deployments"; Section="5"; ProfileLevel="L1"; Automated=$true}
         [PSCustomObject]@{ControlNumber="5.2.2.1"; Title="Ensure multifactor authentication is enabled for all users in administrative roles"; Section="5"; ProfileLevel="L1"; Automated=$true}
         [PSCustomObject]@{ControlNumber="5.2.2.2"; Title="Ensure multifactor authentication is enabled for all users"; Section="5"; ProfileLevel="L1"; Automated=$true}
         [PSCustomObject]@{ControlNumber="5.2.2.3"; Title="Enable Conditional Access policies to block legacy authentication"; Section="5"; ProfileLevel="L1"; Automated=$true}
         [PSCustomObject]@{ControlNumber="5.2.2.4"; Title="Ensure Sign-in frequency is enabled and browser sessions are not persistent for Administrative users"; Section="5"; ProfileLevel="L1"; Automated=$true}
-        [PSCustomObject]@{ControlNumber="5.2.2.5"; Title="Ensure 'Phishing-resistant MFA strength' is required for Administrators"; Section="5"; ProfileLevel="L2"; Automated=$false}
+        [PSCustomObject]@{ControlNumber="5.2.2.5"; Title="Ensure 'Phishing-resistant MFA strength' is required for Administrators"; Section="5"; ProfileLevel="L2"; Automated=$true}
         [PSCustomObject]@{ControlNumber="5.2.2.6"; Title="Enable Identity Protection user risk policies"; Section="5"; ProfileLevel="L1"; Automated=$true}
         [PSCustomObject]@{ControlNumber="5.2.2.7"; Title="Enable Identity Protection sign-in risk policies"; Section="5"; ProfileLevel="L1"; Automated=$true}
-        [PSCustomObject]@{ControlNumber="5.2.2.8"; Title="Ensure 'sign-in risk' is blocked for medium and high risk"; Section="5"; ProfileLevel="L2"; Automated=$false}
+        [PSCustomObject]@{ControlNumber="5.2.2.8"; Title="Ensure 'sign-in risk' is blocked for medium and high risk"; Section="5"; ProfileLevel="L2"; Automated=$true}
         [PSCustomObject]@{ControlNumber="5.2.2.9"; Title="Ensure a managed device is required for authentication"; Section="5"; ProfileLevel="L1"; Automated=$true}
         [PSCustomObject]@{ControlNumber="5.2.2.10"; Title="Ensure a managed device is required to register security information"; Section="5"; ProfileLevel="L1"; Automated=$true}
         [PSCustomObject]@{ControlNumber="5.2.2.11"; Title="Ensure sign-in frequency for Intune Enrollment is set to 'Every time'"; Section="5"; ProfileLevel="L1"; Automated=$true}
         [PSCustomObject]@{ControlNumber="5.2.2.12"; Title="Ensure the device code sign-in flow is blocked"; Section="5"; ProfileLevel="L1"; Automated=$true}
         [PSCustomObject]@{ControlNumber="5.2.3.1"; Title="Ensure Microsoft Authenticator is configured to protect against MFA fatigue"; Section="5"; ProfileLevel="L1"; Automated=$true}
         [PSCustomObject]@{ControlNumber="5.2.3.2"; Title="Ensure custom banned passwords lists are used"; Section="5"; ProfileLevel="L1"; Automated=$true}
-        [PSCustomObject]@{ControlNumber="5.2.3.3"; Title="Ensure password protection is enabled for on-prem Active Directory"; Section="5"; ProfileLevel="L1"; Automated=$false}
+        [PSCustomObject]@{ControlNumber="5.2.3.3"; Title="Ensure password protection is enabled for on-prem Active Directory"; Section="5"; ProfileLevel="L1"; Automated=$true}
         [PSCustomObject]@{ControlNumber="5.2.3.4"; Title="Ensure all member users are 'MFA capable'"; Section="5"; ProfileLevel="L1"; Automated=$true}
         [PSCustomObject]@{ControlNumber="5.2.3.5"; Title="Ensure weak authentication methods are disabled"; Section="5"; ProfileLevel="L1"; Automated=$true}
         [PSCustomObject]@{ControlNumber="5.2.3.6"; Title="Ensure system-preferred multifactor authentication is enabled"; Section="5"; ProfileLevel="L1"; Automated=$true}
-        [PSCustomObject]@{ControlNumber="5.2.3.7"; Title="Ensure the email OTP authentication method is disabled"; Section="5"; ProfileLevel="L2"; Automated=$false}
+        [PSCustomObject]@{ControlNumber="5.2.3.7"; Title="Ensure the email OTP authentication method is disabled"; Section="5"; ProfileLevel="L2"; Automated=$true}
         [PSCustomObject]@{ControlNumber="5.2.4.1"; Title="Ensure 'Self service password reset enabled' is set to 'All'"; Section="5"; ProfileLevel="L1"; Automated=$false}
         [PSCustomObject]@{ControlNumber="5.3.1"; Title="Ensure 'Privileged Identity Management' is used to manage roles"; Section="5"; ProfileLevel="L2"; Automated=$true}
         [PSCustomObject]@{ControlNumber="5.3.2"; Title="Ensure 'Access reviews' for Guest Users are configured"; Section="5"; ProfileLevel="L1"; Automated=$true}
@@ -694,7 +705,7 @@ function Get-CISBenchmarkControl {
         [PSCustomObject]@{ControlNumber="6.5.2"; Title="Ensure MailTips are enabled for end users"; Section="6"; ProfileLevel="L1"; Automated=$true}
         [PSCustomObject]@{ControlNumber="6.5.3"; Title="Ensure additional storage providers are restricted in Outlook on the web"; Section="6"; ProfileLevel="L2"; Automated=$true}
         [PSCustomObject]@{ControlNumber="6.5.4"; Title="Ensure SMTP AUTH is disabled"; Section="6"; ProfileLevel="L1"; Automated=$true}
-        [PSCustomObject]@{ControlNumber="6.5.5"; Title="Ensure Direct Send submissions are rejected"; Section="6"; ProfileLevel="L2"; Automated=$false}
+        [PSCustomObject]@{ControlNumber="6.5.5"; Title="Ensure Direct Send submissions are rejected"; Section="6"; ProfileLevel="L2"; Automated=$true}
         [PSCustomObject]@{ControlNumber="7.2.1"; Title="Ensure modern authentication for SharePoint applications is required"; Section="7"; ProfileLevel="L1"; Automated=$true}
         [PSCustomObject]@{ControlNumber="7.2.2"; Title="Ensure SharePoint and OneDrive integration with Azure AD B2B is enabled"; Section="7"; ProfileLevel="L1"; Automated=$true}
         [PSCustomObject]@{ControlNumber="7.2.3"; Title="Ensure external content sharing is restricted"; Section="7"; ProfileLevel="L1"; Automated=$true}
@@ -725,18 +736,18 @@ function Get-CISBenchmarkControl {
         [PSCustomObject]@{ControlNumber="8.5.8"; Title="Ensure external meeting chat is off"; Section="8"; ProfileLevel="L2"; Automated=$true}
         [PSCustomObject]@{ControlNumber="8.5.9"; Title="Ensure meeting recording is off by default"; Section="8"; ProfileLevel="L2"; Automated=$true}
         [PSCustomObject]@{ControlNumber="8.6.1"; Title="Ensure users can report security concerns in Teams"; Section="8"; ProfileLevel="L1"; Automated=$true}
-        [PSCustomObject]@{ControlNumber="9.1.1"; Title="Ensure guest user access is restricted"; Section="9"; ProfileLevel="L1"; Automated=$false}
-        [PSCustomObject]@{ControlNumber="9.1.2"; Title="Ensure external user invitations are restricted"; Section="9"; ProfileLevel="L1"; Automated=$false}
-        [PSCustomObject]@{ControlNumber="9.1.3"; Title="Ensure guest access to content is restricted"; Section="9"; ProfileLevel="L1"; Automated=$false}
-        [PSCustomObject]@{ControlNumber="9.1.4"; Title="Ensure 'Publish to web' is restricted"; Section="9"; ProfileLevel="L1"; Automated=$false}
-        [PSCustomObject]@{ControlNumber="9.1.5"; Title="Ensure 'Interact with and share R and Python' visuals is 'Disabled'"; Section="9"; ProfileLevel="L2"; Automated=$false}
-        [PSCustomObject]@{ControlNumber="9.1.6"; Title="Ensure 'Allow users to apply sensitivity labels for content' is 'Enabled'"; Section="9"; ProfileLevel="L1"; Automated=$false}
-        [PSCustomObject]@{ControlNumber="9.1.7"; Title="Ensure shareable links are restricted"; Section="9"; ProfileLevel="L1"; Automated=$false}
-        [PSCustomObject]@{ControlNumber="9.1.8"; Title="Ensure enabling of external data sharing is restricted"; Section="9"; ProfileLevel="L1"; Automated=$false}
-        [PSCustomObject]@{ControlNumber="9.1.9"; Title="Ensure 'Block ResourceKey Authentication' is 'Enabled'"; Section="9"; ProfileLevel="L1"; Automated=$false}
-        [PSCustomObject]@{ControlNumber="9.1.10"; Title="Ensure access to APIs by Service Principals is restricted"; Section="9"; ProfileLevel="L1"; Automated=$false}
-        [PSCustomObject]@{ControlNumber="9.1.11"; Title="Ensure Service Principals cannot create and use profiles"; Section="9"; ProfileLevel="L1"; Automated=$false}
-        [PSCustomObject]@{ControlNumber="9.1.12"; Title="Ensure service principals ability to create workspaces, connections and deployment pipelines is restricted"; Section="9"; ProfileLevel="L1"; Automated=$false}
+        [PSCustomObject]@{ControlNumber="9.1.1"; Title="Ensure guest user access is restricted"; Section="9"; ProfileLevel="L1"; Automated=$true}
+        [PSCustomObject]@{ControlNumber="9.1.2"; Title="Ensure external user invitations are restricted"; Section="9"; ProfileLevel="L1"; Automated=$true}
+        [PSCustomObject]@{ControlNumber="9.1.3"; Title="Ensure guest access to content is restricted"; Section="9"; ProfileLevel="L1"; Automated=$true}
+        [PSCustomObject]@{ControlNumber="9.1.4"; Title="Ensure 'Publish to web' is restricted"; Section="9"; ProfileLevel="L1"; Automated=$true}
+        [PSCustomObject]@{ControlNumber="9.1.5"; Title="Ensure 'Interact with and share R and Python' visuals is 'Disabled'"; Section="9"; ProfileLevel="L2"; Automated=$true}
+        [PSCustomObject]@{ControlNumber="9.1.6"; Title="Ensure 'Allow users to apply sensitivity labels for content' is 'Enabled'"; Section="9"; ProfileLevel="L1"; Automated=$true}
+        [PSCustomObject]@{ControlNumber="9.1.7"; Title="Ensure shareable links are restricted"; Section="9"; ProfileLevel="L1"; Automated=$true}
+        [PSCustomObject]@{ControlNumber="9.1.8"; Title="Ensure enabling of external data sharing is restricted"; Section="9"; ProfileLevel="L1"; Automated=$true}
+        [PSCustomObject]@{ControlNumber="9.1.9"; Title="Ensure 'Block ResourceKey Authentication' is 'Enabled'"; Section="9"; ProfileLevel="L1"; Automated=$true}
+        [PSCustomObject]@{ControlNumber="9.1.10"; Title="Ensure access to APIs by Service Principals is restricted"; Section="9"; ProfileLevel="L1"; Automated=$true}
+        [PSCustomObject]@{ControlNumber="9.1.11"; Title="Ensure Service Principals cannot create and use profiles"; Section="9"; ProfileLevel="L1"; Automated=$true}
+        [PSCustomObject]@{ControlNumber="9.1.12"; Title="Ensure service principals ability to create workspaces, connections and deployment pipelines is restricted"; Section="9"; ProfileLevel="L1"; Automated=$true}
     )
 
     $results = $controls
@@ -756,7 +767,7 @@ function Get-CISBenchmarkControl {
     return $results
 }
 
-function Test-CISBenchmarkPrerequisites {
+function Test-CISM365BenchmarkPrerequisites {
     [CmdletBinding()]
     [OutputType([PSCustomObject[]])]
     param()
@@ -766,6 +777,7 @@ function Test-CISBenchmarkPrerequisites {
         @{Name="ExchangeOnlineManagement"; Required=$true}
         @{Name="Microsoft.Online.SharePoint.PowerShell"; Required=$true}
         @{Name="MicrosoftTeams"; Required=$true}
+        @{Name="MicrosoftPowerBIMgmt.Profile"; Required=$false}
     )
 
     $results = @()
@@ -785,7 +797,7 @@ function Test-CISBenchmarkPrerequisites {
     return $results
 }
 
-function Get-CISBenchmarkInfo {
+function Get-CISM365BenchmarkInfo {
     [CmdletBinding()]
     param()
 
@@ -798,25 +810,25 @@ function Get-CISBenchmarkInfo {
     Write-Host "================================================================" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "Available Commands:" -ForegroundColor Yellow
-    Write-Host "  - Connect-CISBenchmark           - Authenticate to Microsoft 365" -ForegroundColor White
-    Write-Host "  - Invoke-CISBenchmark            - Run compliance checks" -ForegroundColor White
-    Write-Host "  - Get-CISBenchmarkControl        - Get control information" -ForegroundColor White
-    Write-Host "  - Test-CISBenchmarkPrerequisites - Check required modules" -ForegroundColor White
-    Write-Host "  - Get-CISBenchmarkInfo           - Display this information" -ForegroundColor White
+    Write-Host "  - Connect-CISM365Benchmark           - Authenticate to Microsoft 365" -ForegroundColor White
+    Write-Host "  - Invoke-CISM365Benchmark            - Run compliance checks" -ForegroundColor White
+    Write-Host "  - Get-CISM365BenchmarkControl        - Get control information" -ForegroundColor White
+    Write-Host "  - Test-CISM365BenchmarkPrerequisites - Check required modules" -ForegroundColor White
+    Write-Host "  - Get-CISM365BenchmarkInfo           - Display this information" -ForegroundColor White
     Write-Host ""
     Write-Host "Quick Start:" -ForegroundColor Yellow
     Write-Host "  1. Authenticate:" -ForegroundColor Gray
-    Write-Host "     Connect-CISBenchmark" -ForegroundColor Green
+    Write-Host "     Connect-CISM365Benchmark" -ForegroundColor Green
     Write-Host ""
     Write-Host "  2. Run compliance checks:" -ForegroundColor Gray
-    Write-Host "     Invoke-CISBenchmark" -ForegroundColor Green
+    Write-Host "     Invoke-CISM365Benchmark" -ForegroundColor Green
     Write-Host ""
     Write-Host "  Or manually specify tenant:" -ForegroundColor Gray
-    Write-Host "     Invoke-CISBenchmark -TenantDomain 'contoso.onmicrosoft.com' \" -ForegroundColor Green
+    Write-Host "     Invoke-CISM365Benchmark -TenantDomain 'contoso.onmicrosoft.com' \" -ForegroundColor Green
     Write-Host "                         -SharePointAdminUrl 'https://contoso-admin.sharepoint.com'" -ForegroundColor Green
     Write-Host ""
     Write-Host "Help:" -ForegroundColor Yellow
-    Write-Host "  Get-Help Invoke-CISBenchmark -Full" -ForegroundColor White
+    Write-Host "  Get-Help Invoke-CISM365Benchmark -Full" -ForegroundColor White
     Write-Host ""
     Write-Host "Links:" -ForegroundColor Yellow
     Write-Host "  - Documentation: https://github.com/mohammedsiddiqui6872/CIS-M365-Benchmark" -ForegroundColor White
@@ -828,9 +840,9 @@ function Get-CISBenchmarkInfo {
 }
 
 Export-ModuleMember -Function @(
-    'Connect-CISBenchmark',
-    'Invoke-CISBenchmark',
-    'Get-CISBenchmarkControl',
-    'Test-CISBenchmarkPrerequisites',
-    'Get-CISBenchmarkInfo'
+    'Connect-CISM365Benchmark',
+    'Invoke-CISM365Benchmark',
+    'Get-CISM365BenchmarkControl',
+    'Test-CISM365BenchmarkPrerequisites',
+    'Get-CISM365BenchmarkInfo'
 )

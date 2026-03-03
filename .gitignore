@@ -68,6 +68,7 @@ Remove-ClaudeAttribution.ps1
 commit-msg-*.txt
 
 # Internal review and analysis files (local only)
+projectstatus.md
 FALSE_POSITIVE_REVIEW.md
 CHANGELOG.md
 Test-Report-Generator.ps1

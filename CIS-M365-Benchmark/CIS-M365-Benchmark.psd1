@@ -1,21 +1,21 @@
 @{
 
 RootModule = 'CIS-M365-Benchmark.psm1'
-ModuleVersion = '4.1.0'
+ModuleVersion = '5.0.0'
 CompatiblePSEditions = @('Desktop', 'Core')
 GUID = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890'
 Author = 'Mohammed Siddiqui'
 CompanyName = 'Community'
 Copyright = '(c) 2025 Mohammed Siddiqui. All rights reserved. MIT License.'
-Description = 'Comprehensive PowerShell script that audits Microsoft 365 environments against all 140 CIS Microsoft 365 Foundations Benchmark v6.0.0 controls. Features 68% automated compliance checks with HTML and CSV reporting. Covers M365 Admin Center, Defender, Purview, Intune, Entra ID, Exchange, SharePoint, Teams, and Power BI security controls.'
+Description = 'Comprehensive PowerShell module that audits Microsoft 365 environments against all 140 CIS Microsoft 365 Foundations Benchmark v6.0.0 controls. Features 93% automated compliance checks (130/140) with HTML and CSV reporting. Covers M365 Admin Center, Defender, Purview, Intune, Entra ID, Exchange, SharePoint, Teams, and Power BI security controls. Only 4 module dependencies - Power BI checks use Graph MSAL directly (no separate PowerBI module needed).'
 PowerShellVersion = '5.1'
 
 FunctionsToExport = @(
-    'Connect-CISBenchmark',
-    'Invoke-CISBenchmark',
-    'Get-CISBenchmarkControl',
-    'Test-CISBenchmarkPrerequisites',
-    'Get-CISBenchmarkInfo'
+    'Connect-CISM365Benchmark',
+    'Invoke-CISM365Benchmark',
+    'Get-CISM365BenchmarkControl',
+    'Test-CISM365BenchmarkPrerequisites',
+    'Get-CISM365BenchmarkInfo'
 )
 
 CmdletsToExport = @()
@@ -26,8 +26,6 @@ FileList = @(
     'CIS-M365-Benchmark.psm1',
     'CIS-M365-Compliance-Checker.ps1',
     'README.md',
-    'CHANGELOG.md',
-    'PERMISSIONS.md',
     'LICENSE'
 )
 

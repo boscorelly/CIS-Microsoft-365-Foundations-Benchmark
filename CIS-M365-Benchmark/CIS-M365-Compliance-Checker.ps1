@@ -9,9 +9,9 @@
     Generates detailed HTML and CSV reports showing compliance status for each control.
 
 .NOTES
-    Version: 3.0.5
+    Version: 4.2.0
     Author: Mohammed Siddiqui
-    Date: 2026-02-24
+    Date: 2026-03-03
 
     Required PowerShell Modules:
     - Microsoft.Graph (Install-Module Microsoft.Graph -Scope CurrentUser)
@@ -67,10 +67,12 @@ $Script:L1TotalControls = 0
 $Script:L1PassedControls = 0
 $Script:L1FailedControls = 0
 $Script:L1ManualControls = 0
+$Script:L1ErrorControls = 0
 $Script:L2TotalControls = 0
 $Script:L2PassedControls = 0
 $Script:L2FailedControls = 0
 $Script:L2ManualControls = 0
+$Script:L2ErrorControls = 0
 
 #region Helper Functions
 
@@ -135,6 +137,7 @@ function Add-Result {
             'Pass' { $Script:L1PassedControls++ }
             'Fail' { $Script:L1FailedControls++ }
             'Manual' { $Script:L1ManualControls++ }
+            'Error' { $Script:L1ErrorControls++ }
         }
     }
     elseif ($ProfileLevel -eq 'L2') {
@@ -143,6 +146,7 @@ function Add-Result {
             'Pass' { $Script:L2PassedControls++ }
             'Fail' { $Script:L2FailedControls++ }
             'Manual' { $Script:L2ManualControls++ }
+            'Error' { $Script:L2ErrorControls++ }
         }
     }
 
@@ -191,15 +195,96 @@ function Connect-M365Services {
     Write-Log "Connecting to Microsoft 365 services..." -Level Info
     Write-Log "NOTE: You will be prompted to sign in once. The same session will be used for all services." -Level Info
 
-    # Check if device code authentication was requested via Connect-CISBenchmark -UseDeviceCode
+    # Check if device code authentication was requested via Connect-CISM365Benchmark -UseDeviceCode
     $useDeviceAuth = $env:CIS_USE_DEVICE_CODE -eq "true"
 
     try {
-        # Check if Microsoft Graph is already connected (e.g., via Connect-CISBenchmark)
+        # ── Power BI FIRST ──────────────────────────────────────────────────
+        # Must connect Power BI BEFORE Microsoft.Graph loads its MSAL version.
+        # In PS 5.1, both modules bundle different MSAL.NET versions and the first
+        # one loaded wins. By connecting PowerBI first, its MSAL loads cleanly.
+        # If Graph is already loaded (from Connect-CISM365Benchmark), we use a
+        # background runspace to isolate the PowerBI token acquisition.
+        $Script:PowerBIConnected = $false
+        $Script:PowerBIAccessToken = $null
+
+        $pbiModule = Get-Module -ListAvailable -Name MicrosoftPowerBIMgmt.Profile -ErrorAction SilentlyContinue
+        if (-not $pbiModule) {
+            Write-Log "Installing MicrosoftPowerBIMgmt.Profile..." -Level Info
+            try {
+                Install-Module -Name MicrosoftPowerBIMgmt.Profile -Scope CurrentUser -Force -SkipPublisherCheck -ErrorAction Stop -WarningAction SilentlyContinue | Out-Null
+                $pbiModule = $true
+            }
+            catch {
+                Write-Log "Could not install MicrosoftPowerBIMgmt.Profile: $_" -Level Warning
+            }
+        }
+
+        if ($pbiModule) {
+            $graphMsalLoaded = [AppDomain]::CurrentDomain.GetAssemblies() | Where-Object {
+                $_.GetName().Name -eq 'Microsoft.Identity.Client'
+            }
+
+            if ($graphMsalLoaded) {
+                # Graph MSAL already loaded - use isolated PowerShell runspace to avoid conflicts
+                Write-Log "Acquiring Power BI token via isolated runspace (Graph MSAL already loaded)..." -Level Info
+                try {
+                    $pbiResult = powershell.exe -NoProfile -Command {
+                        try {
+                            Import-Module MicrosoftPowerBIMgmt.Profile -ErrorAction Stop -WarningAction SilentlyContinue
+                            $WarningPreference = 'SilentlyContinue'
+                            Connect-PowerBIServiceAccount -ErrorAction Stop | Out-Null
+                            $token = Get-PowerBIAccessToken -AsString -ErrorAction Stop
+                            Write-Output ($token.Replace("Bearer ", ""))
+                        }
+                        catch {
+                            Write-Output "ERROR:$($_.Exception.Message)"
+                        }
+                    } 2>$null
+
+                    if ($pbiResult -and -not $pbiResult.StartsWith("ERROR:")) {
+                        $Script:PowerBIAccessToken = $pbiResult.Trim()
+                        $Script:PowerBIConnected = $true
+                        Write-Log "Acquired Power BI token via isolated runspace" -Level Success
+                    }
+                    else {
+                        $errMsg = if ($pbiResult) { $pbiResult.Replace("ERROR:", "") } else { "No output from runspace" }
+                        Write-Log "Warning: Isolated Power BI auth failed: $errMsg" -Level Warning
+                        Write-Log "Power BI checks (Section 9) will remain manual." -Level Warning
+                    }
+                }
+                catch {
+                    Write-Log "Warning: Could not acquire Power BI token: $_" -Level Warning
+                    Write-Log "Power BI checks (Section 9) will remain manual." -Level Warning
+                }
+            }
+            else {
+                # No MSAL loaded yet - safe to use PowerBI module directly
+                Write-Log "Connecting to Power BI Service..." -Level Info
+                try {
+                    Import-Module MicrosoftPowerBIMgmt.Profile -ErrorAction SilentlyContinue -WarningAction SilentlyContinue -Force
+                    $prevWarnPref = $WarningPreference
+                    $WarningPreference = 'SilentlyContinue'
+                    Connect-PowerBIServiceAccount -ErrorAction Stop | Out-Null
+                    $pbiTokenObj = Get-PowerBIAccessToken -AsString -ErrorAction Stop
+                    $Script:PowerBIAccessToken = $pbiTokenObj.Replace("Bearer ", "")
+                    $Script:PowerBIConnected = $true
+                    $WarningPreference = $prevWarnPref
+                    Write-Log "Connected to Power BI Service and acquired token" -Level Success
+                }
+                catch {
+                    $WarningPreference = if ($prevWarnPref) { $prevWarnPref } else { 'Continue' }
+                    Write-Log "Warning: Could not connect to Power BI: $_" -Level Warning
+                    Write-Log "Power BI checks (Section 9) will remain manual." -Level Warning
+                }
+            }
+        }
+
+        # ── Microsoft Graph ─────────────────────────────────────────────────
+        # Check if Microsoft Graph is already connected (e.g., via Connect-CISM365Benchmark)
         $mgContext = Get-MgContext -ErrorAction SilentlyContinue
 
         if (-not $mgContext -or -not $mgContext.TenantId) {
-            # Connect to Microsoft Graph first - this establishes the primary authentication
             Write-Log "Connecting to Microsoft Graph..." -Level Info
             Connect-MgGraph -Scopes "Directory.Read.All", "Policy.Read.All", "AuditLog.Read.All", `
                                    "UserAuthenticationMethod.Read.All", "IdentityRiskyUser.Read.All", `
@@ -219,12 +304,12 @@ function Connect-M365Services {
 
         Write-Log "Using authenticated session for remaining services (TenantId: $tenantId)..." -Level Info
 
-        # Connect to Exchange Online (DisableWAM avoids window handle issues across all environments)
+        # ── Exchange Online ─────────────────────────────────────────────────
         Write-Log "Connecting to Exchange Online..." -Level Info
         Connect-ExchangeOnline -ShowBanner:$false -DisableWAM -ErrorAction Stop
         Write-Log "Connected to Exchange Online" -Level Success
 
-        # Connect to SharePoint Online (ModernAuth provides reliable browser-based auth)
+        # ── SharePoint Online ───────────────────────────────────────────────
         Write-Log "Connecting to SharePoint Online..." -Level Info
         if ($PSVersionTable.PSVersion.Major -ge 7) {
             if (-not (Get-Module -Name "Microsoft.Online.SharePoint.PowerShell")) {
@@ -234,7 +319,7 @@ function Connect-M365Services {
         Connect-SPOService -Url $SharePointAdminUrl -ModernAuth $true -ErrorAction Stop
         Write-Log "Connected to SharePoint Online" -Level Success
 
-        # Connect to Microsoft Teams
+        # ── Microsoft Teams ─────────────────────────────────────────────────
         # Non-fatal - if it fails, Section 8 checks will report errors but all other sections proceed
         Write-Log "Connecting to Microsoft Teams..." -Level Info
         try {
@@ -250,9 +335,20 @@ function Connect-M365Services {
             Write-Log "Teams-related checks (Section 8) will report errors. All other checks will proceed." -Level Warning
         }
 
-        # MSOnline module has been retired (March 2025)
-        # Per-user MFA check (5.1.2.1) now uses Microsoft Graph instead
         Write-Log "MSOnline module is retired. All checks now use Microsoft Graph." -Level Info
+
+        # ── Security & Compliance ───────────────────────────────────────────
+        Write-Log "Connecting to Security & Compliance PowerShell..." -Level Info
+        try {
+            Connect-IPPSSession -WarningAction SilentlyContinue -ErrorAction Stop
+            Write-Log "Connected to Security & Compliance PowerShell" -Level Success
+            $Script:IPPSConnected = $true
+        }
+        catch {
+            Write-Log "Warning: Could not connect to Security & Compliance: $_" -Level Warning
+            Write-Log "DLP and sensitivity label checks will fall back to manual review." -Level Warning
+            $Script:IPPSConnected = $false
+        }
 
         Write-Log "All service connections established successfully!" -Level Success
         return $true
@@ -346,9 +442,49 @@ function Test-M365AdminCenter {
     }
 
     # 1.1.4 - Ensure administrative accounts use licenses with a reduced application footprint
-    Add-Result -ControlNumber "1.1.4" -ControlTitle "Ensure administrative accounts use licenses with a reduced application footprint" `
-               -ProfileLevel "L1" -Result "Manual" -Details "Manual verification of admin licensing required" `
-               -Remediation "Assign minimal licenses to administrative accounts"
+    try {
+        Write-Log "Checking 1.1.4 - Admin account license footprint" -Level Info
+
+        $heavySkus = @("SPE_E3", "SPE_E5", "SPB", "ENTERPRISEPACK", "ENTERPRISEPREMIUM", "O365_BUSINESS_PREMIUM")
+        $allRoles1_1_4 = Get-MgDirectoryRole -All -ErrorAction Stop
+        $adminRoles1_1_4 = $allRoles1_1_4 | Where-Object { $_.RoleTemplateId -notin $readOnlyRoleTemplateIds }
+
+        $adminUserIds = @()
+        foreach ($role in $adminRoles1_1_4) {
+            $members = Get-MgDirectoryRoleMember -DirectoryRoleId $role.Id -ErrorAction Stop
+            foreach ($member in $members) {
+                if ($member.AdditionalProperties.'@odata.type' -eq '#microsoft.graph.user') {
+                    $adminUserIds += $member.Id
+                }
+            }
+        }
+        $adminUserIds = @($adminUserIds | Select-Object -Unique)
+
+        $adminsWithHeavyLicenses = @()
+        foreach ($userId in $adminUserIds) {
+            $licenses = Get-MgUserLicenseDetail -UserId $userId -ErrorAction SilentlyContinue
+            $hasHeavySku = $licenses | Where-Object { $_.SkuPartNumber -in $heavySkus }
+            if ($hasHeavySku) {
+                $user = Get-MgUser -UserId $userId -Property UserPrincipalName -ErrorAction SilentlyContinue
+                $adminsWithHeavyLicenses += "$($user.UserPrincipalName) ($($hasHeavySku.SkuPartNumber -join ', '))"
+            }
+        }
+
+        if ($adminsWithHeavyLicenses.Count -eq 0) {
+            Add-Result -ControlNumber "1.1.4" -ControlTitle "Ensure administrative accounts use licenses with a reduced application footprint" `
+                       -ProfileLevel "L1" -Result "Pass" -Details "All $($adminUserIds.Count) admin accounts use reduced license footprint"
+        }
+        else {
+            Add-Result -ControlNumber "1.1.4" -ControlTitle "Ensure administrative accounts use licenses with a reduced application footprint" `
+                       -ProfileLevel "L1" -Result "Fail" -Details "Admins with full-suite licenses: $($adminsWithHeavyLicenses -join '; ')" `
+                       -Remediation "Assign minimal licenses (e.g., Entra ID P2 only) to administrative accounts instead of E3/E5/Business Premium"
+        }
+    }
+    catch {
+        Add-Result -ControlNumber "1.1.4" -ControlTitle "Ensure administrative accounts use licenses with a reduced application footprint" `
+                   -ProfileLevel "L1" -Result "Manual" -Details "Unable to check admin licensing: $_" `
+                   -Remediation "Verify admin accounts use minimal licenses in Entra Admin Center > Users"
+    }
 
     # 1.2.1 - Ensure that only organizationally managed/approved public groups exist
     try {
@@ -425,34 +561,187 @@ function Test-M365AdminCenter {
     }
 
     # 1.3.2 - Ensure 'Idle session timeout' is set to '3 hours (or less)' for unmanaged devices
-    Add-Result -ControlNumber "1.3.2" -ControlTitle "Ensure 'Idle session timeout' is set to '3 hours (or less)' for unmanaged devices" `
-               -ProfileLevel "L2" -Result "Manual" -Details "Check M365 Admin Center > Settings > Org Settings > Security & privacy" `
-               -Remediation "Configure idle session timeout to 3 hours or less"
+    try {
+        Write-Log "Checking 1.3.2 - Idle session timeout" -Level Info
+        $timeoutPolicies = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/policies/activityBasedTimeoutPolicies" -ErrorAction Stop
+
+        if ($timeoutPolicies.value.Count -gt 0) {
+            $compliant = $false
+            $timeoutValue = "Not set"
+            foreach ($policy in $timeoutPolicies.value) {
+                foreach ($def in $policy.definition) {
+                    $parsed = $def | ConvertFrom-Json
+                    $appPolicy = $parsed.ActivityBasedTimeoutPolicy.ApplicationPolicies | Where-Object { $_.ApplicationId -eq "default" }
+                    if ($appPolicy -and $appPolicy.WebSessionIdleTimeout) {
+                        $timeout = [TimeSpan]::Parse($appPolicy.WebSessionIdleTimeout)
+                        $timeoutValue = $appPolicy.WebSessionIdleTimeout
+                        if ($timeout.TotalHours -le 3) { $compliant = $true }
+                    }
+                }
+            }
+            if ($compliant) {
+                Add-Result -ControlNumber "1.3.2" -ControlTitle "Ensure 'Idle session timeout' is set to '3 hours (or less)' for unmanaged devices" `
+                           -ProfileLevel "L2" -Result "Pass" -Details "Idle session timeout configured: $timeoutValue"
+            }
+            else {
+                Add-Result -ControlNumber "1.3.2" -ControlTitle "Ensure 'Idle session timeout' is set to '3 hours (or less)' for unmanaged devices" `
+                           -ProfileLevel "L2" -Result "Fail" -Details "Idle session timeout exceeds 3 hours: $timeoutValue" `
+                           -Remediation "Set idle session timeout to 3 hours or less in M365 Admin Center > Settings > Org Settings > Security & privacy"
+            }
+        }
+        else {
+            Add-Result -ControlNumber "1.3.2" -ControlTitle "Ensure 'Idle session timeout' is set to '3 hours (or less)' for unmanaged devices" `
+                       -ProfileLevel "L2" -Result "Fail" -Details "No activity-based timeout policy configured" `
+                       -Remediation "Configure idle session timeout in M365 Admin Center > Settings > Org Settings > Security & privacy"
+        }
+    }
+    catch {
+        Add-Result -ControlNumber "1.3.2" -ControlTitle "Ensure 'Idle session timeout' is set to '3 hours (or less)' for unmanaged devices" `
+                   -ProfileLevel "L2" -Result "Manual" -Details "Unable to check idle session timeout: $_" `
+                   -Remediation "Check M365 Admin Center > Settings > Org Settings > Security & privacy"
+    }
 
     # 1.3.3 - Ensure 'External sharing' of calendars is not available
-    Add-Result -ControlNumber "1.3.3" -ControlTitle "Ensure 'External sharing' of calendars is not available" `
-               -ProfileLevel "L2" -Result "Manual" -Details "Check M365 Admin Center > Settings > Calendar" `
-               -Remediation "Disable external calendar sharing"
+    try {
+        Write-Log "Checking 1.3.3 - External calendar sharing" -Level Info
+        $sharingPolicies = Get-SharingPolicy -ErrorAction Stop
+        $externalCalendarEnabled = $false
+
+        foreach ($policy in $sharingPolicies) {
+            if ($policy.Enabled -eq $true -and $policy.Domains) {
+                foreach ($domain in $policy.Domains) {
+                    # Domain entries containing 'CalendarSharing' indicate external calendar sharing
+                    if ($domain -like "*CalendarSharing*") {
+                        $externalCalendarEnabled = $true
+                        break
+                    }
+                }
+            }
+            if ($externalCalendarEnabled) { break }
+        }
+
+        if (-not $externalCalendarEnabled) {
+            Add-Result -ControlNumber "1.3.3" -ControlTitle "Ensure 'External sharing' of calendars is not available" `
+                       -ProfileLevel "L2" -Result "Pass" -Details "External calendar sharing is disabled"
+        }
+        else {
+            Add-Result -ControlNumber "1.3.3" -ControlTitle "Ensure 'External sharing' of calendars is not available" `
+                       -ProfileLevel "L2" -Result "Fail" -Details "External calendar sharing is enabled in sharing policy" `
+                       -Remediation "Set-SharingPolicy -Identity 'Default Sharing Policy' -Enabled `$false"
+        }
+    }
+    catch {
+        Add-Result -ControlNumber "1.3.3" -ControlTitle "Ensure 'External sharing' of calendars is not available" `
+                   -ProfileLevel "L2" -Result "Manual" -Details "Unable to check sharing policy: $_. Check M365 Admin Center > Settings > Calendar" `
+                   -Remediation "Disable external calendar sharing"
+    }
 
     # 1.3.4 - Ensure 'User owned apps and services' is restricted
-    Add-Result -ControlNumber "1.3.4" -ControlTitle "Ensure 'User owned apps and services' is restricted" `
-               -ProfileLevel "L1" -Result "Manual" -Details "Check M365 Admin Center > Settings > Org Settings > Services > User owned apps and services" `
-               -Remediation "Restrict user-owned applications and services"
+    try {
+        Write-Log "Checking 1.3.4 - User owned apps and services" -Level Info
+        # Try the nested settings endpoint first, fall back to parent endpoint
+        $appsSettings = $null
+        try {
+            $appsSettings = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/beta/admin/appsAndServices/settings" -ErrorAction Stop
+        }
+        catch {
+            $appsResponse = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/beta/admin/appsAndServices" -ErrorAction Stop
+            $appsSettings = $appsResponse.settings
+            if (-not $appsSettings) { $appsSettings = $appsResponse }
+        }
+        $storeDisabled = $appsSettings.isOfficeStoreEnabled -eq $false
+        $trialDisabled = $appsSettings.isAppAndServicesTrialEnabled -eq $false
+
+        if ($storeDisabled -and $trialDisabled) {
+            Add-Result -ControlNumber "1.3.4" -ControlTitle "Ensure 'User owned apps and services' is restricted" `
+                       -ProfileLevel "L1" -Result "Pass" -Details "Office Store disabled, app trials disabled"
+        }
+        else {
+            $issues = @()
+            if (-not $storeDisabled) { $issues += "Office Store enabled" }
+            if (-not $trialDisabled) { $issues += "App trials enabled" }
+            Add-Result -ControlNumber "1.3.4" -ControlTitle "Ensure 'User owned apps and services' is restricted" `
+                       -ProfileLevel "L1" -Result "Fail" -Details ($issues -join '; ') `
+                       -Remediation "Disable user-owned apps in M365 Admin Center > Settings > Org Settings > User owned apps and services"
+        }
+    }
+    catch {
+        Add-Result -ControlNumber "1.3.4" -ControlTitle "Ensure 'User owned apps and services' is restricted" `
+                   -ProfileLevel "L1" -Result "Manual" -Details "Unable to check app settings: $_" `
+                   -Remediation "Check M365 Admin Center > Settings > Org Settings > User owned apps and services. Ensure OrgSettings-AppsAndServices.Read.All scope is consented."
+    }
 
     # 1.3.5 - Ensure internal phishing protection for Forms is enabled
-    Add-Result -ControlNumber "1.3.5" -ControlTitle "Ensure internal phishing protection for Forms is enabled" `
-               -ProfileLevel "L1" -Result "Manual" -Details "Check M365 Admin Center > Settings > Org Settings > Microsoft Forms" `
-               -Remediation "Enable phishing protection for Microsoft Forms"
+    try {
+        Write-Log "Checking 1.3.5 - Forms phishing protection" -Level Info
+        # Try nested settings endpoint first, fall back to parent endpoint
+        $formsSettings = $null
+        try {
+            $formsSettings = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/beta/admin/forms/settings" -ErrorAction Stop
+        }
+        catch {
+            $formsResponse = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/beta/admin/forms" -ErrorAction Stop
+            $formsSettings = $formsResponse.settings
+            if (-not $formsSettings) { $formsSettings = $formsResponse }
+        }
+
+        if ($formsSettings.isInOrgFormsPhishingScanEnabled -eq $true) {
+            Add-Result -ControlNumber "1.3.5" -ControlTitle "Ensure internal phishing protection for Forms is enabled" `
+                       -ProfileLevel "L1" -Result "Pass" -Details "Internal phishing protection for Forms is enabled"
+        }
+        else {
+            Add-Result -ControlNumber "1.3.5" -ControlTitle "Ensure internal phishing protection for Forms is enabled" `
+                       -ProfileLevel "L1" -Result "Fail" -Details "Internal phishing protection for Forms is disabled" `
+                       -Remediation "Enable phishing protection in M365 Admin Center > Settings > Org Settings > Microsoft Forms"
+        }
+    }
+    catch {
+        Add-Result -ControlNumber "1.3.5" -ControlTitle "Ensure internal phishing protection for Forms is enabled" `
+                   -ProfileLevel "L1" -Result "Manual" -Details "Unable to check Forms settings: $_" `
+                   -Remediation "Check M365 Admin Center > Settings > Org Settings > Microsoft Forms. Ensure OrgSettings-Forms.Read.All scope is consented."
+    }
 
     # 1.3.6 - Ensure the customer lockbox feature is enabled
-    Add-Result -ControlNumber "1.3.6" -ControlTitle "Ensure the customer lockbox feature is enabled" `
-               -ProfileLevel "L2" -Result "Manual" -Details "Check M365 Admin Center > Settings > Org Settings > Security & Privacy > Customer Lockbox" `
-               -Remediation "Enable Customer Lockbox feature"
+    try {
+        Write-Log "Checking 1.3.6 - Customer lockbox" -Level Info
+        $orgConfig = Get-OrganizationConfig -ErrorAction Stop
+
+        if ($orgConfig.CustomerLockBoxEnabled -eq $true) {
+            Add-Result -ControlNumber "1.3.6" -ControlTitle "Ensure the customer lockbox feature is enabled" `
+                       -ProfileLevel "L2" -Result "Pass" -Details "Customer Lockbox is enabled"
+        }
+        else {
+            Add-Result -ControlNumber "1.3.6" -ControlTitle "Ensure the customer lockbox feature is enabled" `
+                       -ProfileLevel "L2" -Result "Fail" -Details "Customer Lockbox is not enabled" `
+                       -Remediation "Set-OrganizationConfig -CustomerLockBoxEnabled `$true (requires E5/G5 or Customer Lockbox add-on)"
+        }
+    }
+    catch {
+        Add-Result -ControlNumber "1.3.6" -ControlTitle "Ensure the customer lockbox feature is enabled" `
+                   -ProfileLevel "L2" -Result "Manual" -Details "Unable to check Customer Lockbox: $_. Check M365 Admin Center > Settings > Org Settings > Security & Privacy > Customer Lockbox" `
+                   -Remediation "Enable Customer Lockbox feature"
+    }
 
     # 1.3.7 - Ensure 'third-party storage services' are restricted in 'Microsoft 365 on the web'
-    Add-Result -ControlNumber "1.3.7" -ControlTitle "Ensure 'third-party storage services' are restricted in 'Microsoft 365 on the web'" `
-               -ProfileLevel "L2" -Result "Manual" -Details "Check M365 Admin Center > Settings > Org Settings > Microsoft 365 on the web" `
-               -Remediation "Disable third-party storage services"
+    try {
+        Write-Log "Checking 1.3.7 - Third-party storage services" -Level Info
+        $m365WebSP = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/servicePrincipals?`$filter=appId eq 'c1f33bc0-bdb4-4248-ba9b-096807ddb43e'" -ErrorAction Stop
+
+        if ($m365WebSP.value.Count -eq 0 -or $m365WebSP.value[0].accountEnabled -eq $false) {
+            Add-Result -ControlNumber "1.3.7" -ControlTitle "Ensure 'third-party storage services' are restricted in 'Microsoft 365 on the web'" `
+                       -ProfileLevel "L2" -Result "Pass" -Details "Third-party storage services are disabled for M365 on the web"
+        }
+        else {
+            Add-Result -ControlNumber "1.3.7" -ControlTitle "Ensure 'third-party storage services' are restricted in 'Microsoft 365 on the web'" `
+                       -ProfileLevel "L2" -Result "Fail" -Details "Third-party storage services are enabled for M365 on the web" `
+                       -Remediation "Disable third-party storage in M365 Admin Center > Settings > Org Settings > Microsoft 365 on the web"
+        }
+    }
+    catch {
+        Add-Result -ControlNumber "1.3.7" -ControlTitle "Ensure 'third-party storage services' are restricted in 'Microsoft 365 on the web'" `
+                   -ProfileLevel "L2" -Result "Manual" -Details "Unable to check third-party storage: $_" `
+                   -Remediation "Check M365 Admin Center > Settings > Org Settings > Microsoft 365 on the web"
+    }
 
     # 1.3.8 - Ensure that Sways cannot be shared with people outside of your organization
     Add-Result -ControlNumber "1.3.8" -ControlTitle "Ensure that Sways cannot be shared with people outside of your organization" `
@@ -477,8 +766,10 @@ function Test-M365Defender {
     $cachedMalwareFilterPolicy = $null
     $cachedHostedContentFilterPolicy = $null
     $cachedAcceptedDomains = $null
+    $cachedConnectionFilterPolicy = $null
     try { $cachedMalwareFilterPolicy = Get-MalwareFilterPolicy } catch { Write-Log "Warning: Could not retrieve MalwareFilterPolicy. Related checks will report errors." -Level Warning }
     try { $cachedHostedContentFilterPolicy = Get-HostedContentFilterPolicy } catch { Write-Log "Warning: Could not retrieve HostedContentFilterPolicy. Related checks will report errors." -Level Warning }
+    try { $cachedConnectionFilterPolicy = Get-HostedConnectionFilterPolicy -Identity Default } catch { Write-Log "Warning: Could not retrieve ConnectionFilterPolicy. Related checks will report errors." -Level Warning }
     try { $cachedAcceptedDomains = Get-AcceptedDomain } catch { Write-Log "Warning: Could not retrieve AcceptedDomain. Related checks will report errors." -Level Warning }
 
     # 2.1.1 - Ensure Safe Links for Office Applications is Enabled
@@ -732,35 +1023,73 @@ function Test-M365Defender {
         Write-Log "Checking 2.1.10 - DMARC records" -Level Info
         $acceptedDomains = $cachedAcceptedDomains
         $missingDmarc = @()
+        $skippedSubdomains = @()
 
-        foreach ($domain in $acceptedDomains) {
-            if ($domain.DomainType -eq "Authoritative") {
-                # Skip *.onmicrosoft.com domains - DMARC is managed by Microsoft and cannot be added by tenants
-                if ($domain.DomainName -like "*.onmicrosoft.com") {
-                    Write-Log "Skipping $($domain.DomainName) - Microsoft-managed domain" -Level Info
-                    continue
+        # Collect authoritative domains (excluding onmicrosoft.com)
+        $authDomains = @($acceptedDomains | Where-Object {
+            $_.DomainType -eq "Authoritative" -and $_.DomainName -notlike "*.onmicrosoft.com"
+        })
+
+        # First pass: resolve DMARC for all domains and build parent sp= lookup
+        $dmarcCache = @{}
+        foreach ($domain in $authDomains) {
+            try {
+                $dmarcRecord = Resolve-DnsName -Name "_dmarc.$($domain.DomainName)" -Type TXT -ErrorAction SilentlyContinue |
+                               Where-Object { $_.Strings -like "*v=DMARC1*" }
+                if ($dmarcRecord) {
+                    $dmarcCache[$domain.DomainName] = ($dmarcRecord.Strings | Where-Object { $_ -like "*v=DMARC1*" }) -join " "
                 }
-                try {
-                    $dmarcRecord = Resolve-DnsName -Name "_dmarc.$($domain.DomainName)" -Type TXT -ErrorAction SilentlyContinue |
-                                   Where-Object { $_.Strings -like "*v=DMARC1*" }
-                    if (-not $dmarcRecord) {
-                        $missingDmarc += $domain.DomainName
-                    }
+            }
+            catch {
+                # DNS resolution failed - domain has no DMARC
+            }
+        }
+
+        # Second pass: check each domain, skipping subdomains covered by parent sp= tag
+        foreach ($domain in $authDomains) {
+            $domainName = $domain.DomainName
+            Write-Log "Checking DMARC for $domainName" -Level Info
+
+            # Check if this is a subdomain and if the parent domain DMARC has sp= tag
+            $parts = $domainName.Split('.')
+            $isSubdomainCovered = $false
+            if ($parts.Count -gt 2) {
+                # Build parent domain (e.g., sub.example.com -> example.com)
+                $parentDomain = ($parts[($parts.Count - 2)..($parts.Count - 1)]) -join '.'
+                if ($dmarcCache.ContainsKey($parentDomain) -and $dmarcCache[$parentDomain] -match 'sp=') {
+                    $isSubdomainCovered = $true
+                    $skippedSubdomains += $domainName
+                    Write-Log "Skipping $domainName - parent domain $parentDomain DMARC has sp= tag" -Level Info
                 }
-                catch {
-                    $missingDmarc += $domain.DomainName
+            }
+
+            if (-not $isSubdomainCovered) {
+                if (-not $dmarcCache.ContainsKey($domainName)) {
+                    $missingDmarc += $domainName
                 }
             }
         }
 
+        $detailParts = @()
+        if ($missingDmarc.Count -eq 0 -and $skippedSubdomains.Count -eq 0) {
+            $detailParts += "DMARC records present for all domains"
+        }
+        elseif ($missingDmarc.Count -eq 0 -and $skippedSubdomains.Count -gt 0) {
+            $detailParts += "DMARC records present for all domains ($($skippedSubdomains.Count) subdomain(s) covered by parent sp= policy: $($skippedSubdomains -join ', '))"
+        }
+
         if ($missingDmarc.Count -eq 0) {
             Add-Result -ControlNumber "2.1.10" -ControlTitle "Ensure DMARC Records for all Exchange Online domains are published" `
-                       -ProfileLevel "L1" -Result "Pass" -Details "DMARC records present for all domains"
+                       -ProfileLevel "L1" -Result "Pass" -Details ($detailParts -join "; ")
         }
         else {
+            $details = "Missing DMARC records for: $($missingDmarc -join ', ')"
+            if ($skippedSubdomains.Count -gt 0) {
+                $details += " (Subdomains covered by parent sp= policy: $($skippedSubdomains -join ', '))"
+            }
             Add-Result -ControlNumber "2.1.10" -ControlTitle "Ensure DMARC Records for all Exchange Online domains are published" `
-                       -ProfileLevel "L1" -Result "Fail" -Details "Missing DMARC records for: $($missingDmarc -join ', ')" `
-                       -Remediation "Publish DMARC records for all domains"
+                       -ProfileLevel "L1" -Result "Fail" -Details $details `
+                       -Remediation "Publish DMARC records for all domains: _dmarc.<domain> TXT 'v=DMARC1; p=reject; rua=mailto:dmarc@<domain>'"
         }
     }
     catch {
@@ -774,44 +1103,39 @@ function Test-M365Defender {
         if ($null -eq $cachedMalwareFilterPolicy) { throw "MalwareFilterPolicy data unavailable" }
         $malwarePolicies = $cachedMalwareFilterPolicy
 
-        # Comprehensive list of dangerous file types per CIS Benchmark
+        # Key dangerous file types per CIS Benchmark (representative subset for validation)
         $requiredBlockedTypes = @('ace','ani','app','docm','exe','jar','reg','scr','vbe','vbs','xlsm')
-        $allTypesBlocked = $false
-        $bestPolicyName = $null
-        $bestMissingTypes = $requiredBlockedTypes  # Start with all types missing
 
-        foreach ($policy in $malwarePolicies) {
-            if ($policy.EnableFileFilter -eq $true -and $policy.FileTypes) {
-                $missingTypes = @($requiredBlockedTypes | Where-Object { $policy.FileTypes -notcontains $_ })
-                if ($missingTypes.Count -eq 0) {
-                    $allTypesBlocked = $true
-                    $bestPolicyName = $policy.Name
-                    break
-                }
-                # Track the policy with the fewest missing types for better diagnostics
-                if ($missingTypes.Count -lt $bestMissingTypes.Count) {
-                    $bestMissingTypes = $missingTypes
-                    $bestPolicyName = $policy.Name
-                }
+        # Collect policies with file filter enabled
+        $enabledPolicies = @($malwarePolicies | Where-Object { $_.EnableFileFilter -eq $true -and $_.FileTypes })
+
+        if ($enabledPolicies.Count -gt 0) {
+            # Union all blocked file types across all active policies
+            $allBlockedTypes = @()
+            $policyNames = @()
+            foreach ($policy in $enabledPolicies) {
+                $allBlockedTypes += $policy.FileTypes
+                $policyNames += $policy.Name
             }
-        }
+            $allBlockedTypes = @($allBlockedTypes | Select-Object -Unique)
 
-        if ($allTypesBlocked) {
-            Add-Result -ControlNumber "2.1.11" -ControlTitle "Ensure comprehensive attachment filtering is applied" `
-                       -ProfileLevel "L2" -Result "Pass" -Details "Comprehensive attachment filtering configured in policy '$bestPolicyName'"
+            $missingTypes = @($requiredBlockedTypes | Where-Object { $allBlockedTypes -notcontains $_ })
+
+            if ($missingTypes.Count -eq 0) {
+                Add-Result -ControlNumber "2.1.11" -ControlTitle "Ensure comprehensive attachment filtering is applied" `
+                           -ProfileLevel "L2" -Result "Pass" -Details "Comprehensive attachment filtering configured across $($enabledPolicies.Count) policy/policies ($($policyNames -join ', ')). $($allBlockedTypes.Count) total file types blocked."
+            }
+            else {
+                Add-Result -ControlNumber "2.1.11" -ControlTitle "Ensure comprehensive attachment filtering is applied" `
+                           -ProfileLevel "L2" -Result "Fail" -Details "File filter enabled in $($enabledPolicies.Count) policy/policies but missing types across all policies combined: $($missingTypes -join ', ')" `
+                           -Remediation "Add missing file types to a malware filter policy: Set-MalwareFilterPolicy -Identity '<PolicyName>' -FileTypes @{Add='$($missingTypes -join "','")' }"
+            }
         }
         else {
             $policyCount = @($malwarePolicies).Count
-            $policiesWithFilter = @($malwarePolicies | Where-Object { $_.EnableFileFilter -eq $true }).Count
-            if ($policiesWithFilter -eq 0) {
-                $failDetails = "No malware filter policies have the file filter enabled ($policyCount policies found). Required blocked types: $($requiredBlockedTypes -join ', ')"
-            }
-            else {
-                $failDetails = "No policy blocks all required types. Checked $policyCount policies ($policiesWithFilter with file filter enabled). Missing types in best policy '$bestPolicyName': $($bestMissingTypes -join ', ')"
-            }
             Add-Result -ControlNumber "2.1.11" -ControlTitle "Ensure comprehensive attachment filtering is applied" `
-                       -ProfileLevel "L2" -Result "Fail" -Details $failDetails `
-                       -Remediation "Enable the Common Attachment Types Filter and ensure all dangerous file types are blocked: $($requiredBlockedTypes -join ', ')"
+                       -ProfileLevel "L2" -Result "Fail" -Details "No malware filter policies have the file filter enabled ($policyCount policies found)" `
+                       -Remediation "Enable the Common Attachment Types Filter: Set-MalwareFilterPolicy -Identity 'Default' -EnableFileFilter `$true"
         }
     }
     catch {
@@ -822,7 +1146,8 @@ function Test-M365Defender {
     # 2.1.12 - Ensure the connection filter IP allow list is not used
     try {
         Write-Log "Checking 2.1.12 - Connection filter IP allow list" -Level Info
-        $connectionFilter = Get-HostedConnectionFilterPolicy -Identity Default
+        if ($null -eq $cachedConnectionFilterPolicy) { throw "ConnectionFilterPolicy data unavailable" }
+        $connectionFilter = $cachedConnectionFilterPolicy
 
         if ($connectionFilter.IPAllowList.Count -eq 0) {
             Add-Result -ControlNumber "2.1.12" -ControlTitle "Ensure the connection filter IP allow list is not used" `
@@ -842,7 +1167,8 @@ function Test-M365Defender {
     # 2.1.13 - Ensure the connection filter safe list is off
     try {
         Write-Log "Checking 2.1.13 - Connection filter safe list" -Level Info
-        $connectionFilter = Get-HostedConnectionFilterPolicy -Identity Default
+        if ($null -eq $cachedConnectionFilterPolicy) { throw "ConnectionFilterPolicy data unavailable" }
+        $connectionFilter = $cachedConnectionFilterPolicy
 
         if ($connectionFilter.EnableSafeList -eq $false) {
             Add-Result -ControlNumber "2.1.13" -ControlTitle "Ensure the connection filter safe list is off" `
@@ -908,14 +1234,63 @@ function Test-M365Defender {
                -Remediation "Set up monitoring and alerts for emergency access accounts"
 
     # 2.4.1 - Ensure Priority account protection is enabled and configured
-    Add-Result -ControlNumber "2.4.1" -ControlTitle "Ensure Priority account protection is enabled and configured" `
-               -ProfileLevel "L1" -Result "Manual" -Details "Verify in M365 Defender portal > Email & collaboration > Priority account protection" `
-               -Remediation "Configure priority account protection for executive accounts"
+    try {
+        Write-Log "Checking 2.4.1 - Priority account protection" -Level Info
+        $eopRules = @(Get-EOPProtectionPolicyRule -ErrorAction Stop)
+        $atpRules = @(Get-ATPProtectionPolicyRule -ErrorAction Stop)
+
+        $eopEnabled = $eopRules | Where-Object { $_.State -eq "Enabled" }
+        $atpEnabled = $atpRules | Where-Object { $_.State -eq "Enabled" }
+
+        if ($eopEnabled -and $atpEnabled) {
+            Add-Result -ControlNumber "2.4.1" -ControlTitle "Ensure Priority account protection is enabled and configured" `
+                       -ProfileLevel "L1" -Result "Pass" -Details "EOP and ATP protection policy rules are enabled"
+        }
+        else {
+            $missing = @()
+            if (-not $eopEnabled) { $missing += "EOP protection rules" }
+            if (-not $atpEnabled) { $missing += "ATP protection rules" }
+            Add-Result -ControlNumber "2.4.1" -ControlTitle "Ensure Priority account protection is enabled and configured" `
+                       -ProfileLevel "L1" -Result "Fail" -Details "Missing: $($missing -join ', ')" `
+                       -Remediation "Configure priority account protection in M365 Defender portal > Email & collaboration"
+        }
+    }
+    catch {
+        Add-Result -ControlNumber "2.4.1" -ControlTitle "Ensure Priority account protection is enabled and configured" `
+                   -ProfileLevel "L1" -Result "Manual" -Details "Unable to check protection policies: $_" `
+                   -Remediation "Verify in M365 Defender portal > Email & collaboration > Priority account protection"
+    }
 
     # 2.4.2 - Ensure Priority accounts have 'Strict protection' presets applied
-    Add-Result -ControlNumber "2.4.2" -ControlTitle "Ensure Priority accounts have 'Strict protection' presets applied" `
-               -ProfileLevel "L1" -Result "Manual" -Details "Verify strict protection preset is applied to priority accounts" `
-               -Remediation "Apply strict protection preset to all priority accounts"
+    try {
+        Write-Log "Checking 2.4.2 - Strict preset for priority accounts" -Level Info
+        $strictEOP = Get-EOPProtectionPolicyRule -Identity "Strict Preset Security Policy" -ErrorAction Stop
+        $strictATP = Get-ATPProtectionPolicyRule -Identity "Strict Preset Security Policy" -ErrorAction Stop
+
+        $strictEnabled = ($strictEOP.State -eq "Enabled") -and ($strictATP.State -eq "Enabled")
+        $hasTargets = ($strictEOP.SentTo -or $strictEOP.SentToMemberOf) -and
+                      ($strictATP.SentTo -or $strictATP.SentToMemberOf)
+
+        if ($strictEnabled -and $hasTargets) {
+            Add-Result -ControlNumber "2.4.2" -ControlTitle "Ensure Priority accounts have 'Strict protection' presets applied" `
+                       -ProfileLevel "L1" -Result "Pass" -Details "Strict Preset Security Policy is enabled and targets configured"
+        }
+        elseif ($strictEnabled -and -not $hasTargets) {
+            Add-Result -ControlNumber "2.4.2" -ControlTitle "Ensure Priority accounts have 'Strict protection' presets applied" `
+                       -ProfileLevel "L1" -Result "Fail" -Details "Strict Preset enabled but no priority accounts/groups targeted" `
+                       -Remediation "Add priority accounts to Strict Preset Security Policy targets"
+        }
+        else {
+            Add-Result -ControlNumber "2.4.2" -ControlTitle "Ensure Priority accounts have 'Strict protection' presets applied" `
+                       -ProfileLevel "L1" -Result "Fail" -Details "Strict Preset Security Policy not enabled" `
+                       -Remediation "Enable Strict Preset Security Policy and apply to priority accounts"
+        }
+    }
+    catch {
+        Add-Result -ControlNumber "2.4.2" -ControlTitle "Ensure Priority accounts have 'Strict protection' presets applied" `
+                   -ProfileLevel "L1" -Result "Manual" -Details "Unable to check Strict Preset policy: $_" `
+                   -Remediation "Verify strict protection preset is applied to priority accounts in M365 Defender"
+    }
 
     # 2.4.3 - Ensure Microsoft Defender for Cloud Apps is enabled and configured
     Add-Result -ControlNumber "2.4.3" -ControlTitle "Ensure Microsoft Defender for Cloud Apps is enabled and configured" `
@@ -944,10 +1319,42 @@ function Test-M365Defender {
     }
 
     # 2.1.15 - Ensure outbound anti-spam message limits are in place (NEW in v6.0.0)
-    Write-Log "Checking 2.1.15 - Outbound anti-spam message limits" -Level Info
-    Add-Result -ControlNumber "2.1.15" -ControlTitle "Ensure outbound anti-spam message limits are in place" `
-               -ProfileLevel "L1" -Result "Manual" -Details "Manual verification required. Check Microsoft Defender Portal > Policies > Anti-spam > Outbound policy" `
-               -Remediation "Configure outbound message limits in Anti-spam outbound policy to restrict bulk sending"
+    try {
+        Write-Log "Checking 2.1.15 - Outbound anti-spam message limits" -Level Info
+        $outboundSpam = Get-HostedOutboundSpamFilterPolicy -ErrorAction Stop
+        $defaultPolicy = $outboundSpam | Where-Object { $_.IsDefault -eq $true }
+        if (-not $defaultPolicy) { $defaultPolicy = $outboundSpam | Select-Object -First 1 }
+
+        if ($defaultPolicy) {
+            $extLimit = $defaultPolicy.RecipientLimitExternalPerHour
+            $intLimit = $defaultPolicy.RecipientLimitInternalPerHour
+            $dayLimit = $defaultPolicy.RecipientLimitPerDay
+            $action = $defaultPolicy.ActionWhenThresholdReached
+
+            $hasLimits = ($extLimit -gt 0) -and ($intLimit -gt 0) -and ($dayLimit -gt 0)
+            $blocksUser = ($action -eq "BlockUser" -or $action -eq "BlockUserForToday")
+
+            if ($hasLimits -and $blocksUser) {
+                Add-Result -ControlNumber "2.1.15" -ControlTitle "Ensure outbound anti-spam message limits are in place" `
+                           -ProfileLevel "L1" -Result "Pass" -Details "Limits: External/hr=$extLimit, Internal/hr=$intLimit, Daily=$dayLimit, Action=$action"
+            }
+            else {
+                Add-Result -ControlNumber "2.1.15" -ControlTitle "Ensure outbound anti-spam message limits are in place" `
+                           -ProfileLevel "L1" -Result "Fail" -Details "Limits: External/hr=$extLimit, Internal/hr=$intLimit, Daily=$dayLimit, Action=$action" `
+                           -Remediation "Set outbound spam limits and set ActionWhenThresholdReached to BlockUser"
+            }
+        }
+        else {
+            Add-Result -ControlNumber "2.1.15" -ControlTitle "Ensure outbound anti-spam message limits are in place" `
+                       -ProfileLevel "L1" -Result "Fail" -Details "No outbound spam filter policy found" `
+                       -Remediation "Configure outbound spam filter policy with message limits"
+        }
+    }
+    catch {
+        Add-Result -ControlNumber "2.1.15" -ControlTitle "Ensure outbound anti-spam message limits are in place" `
+                   -ProfileLevel "L1" -Result "Manual" -Details "Unable to check outbound spam policy: $_" `
+                   -Remediation "Check Microsoft Defender Portal > Policies > Anti-spam > Outbound policy"
+    }
 }
 
 #endregion
@@ -1044,9 +1451,39 @@ function Test-Purview {
     }
 
     # 3.3.1 - Ensure Information Protection sensitivity label policies are published
-    Add-Result -ControlNumber "3.3.1" -ControlTitle "Ensure Information Protection sensitivity label policies are published" `
-               -ProfileLevel "L1" -Result "Manual" -Details "Verify sensitivity labels in Microsoft Purview > Information Protection" `
-               -Remediation "Create and publish sensitivity label policies"
+    try {
+        Write-Log "Checking 3.3.1 - Sensitivity label policies" -Level Info
+        try {
+            $labelPolicies = Get-LabelPolicy -ErrorAction Stop
+            if ($labelPolicies.Count -gt 0) {
+                $enabledPolicies = @($labelPolicies | Where-Object { $_.Mode -ne "PendingDeletion" })
+                if ($enabledPolicies.Count -gt 0) {
+                    $policyNames = ($enabledPolicies | Select-Object -ExpandProperty Name) -join ', '
+                    Add-Result -ControlNumber "3.3.1" -ControlTitle "Ensure Information Protection sensitivity label policies are published" `
+                               -ProfileLevel "L1" -Result "Pass" -Details "Sensitivity label policies published: $policyNames"
+                }
+                else {
+                    Add-Result -ControlNumber "3.3.1" -ControlTitle "Ensure Information Protection sensitivity label policies are published" `
+                               -ProfileLevel "L1" -Result "Fail" -Details "No active sensitivity label policies found" `
+                               -Remediation "Create and publish sensitivity label policies in Microsoft Purview > Information Protection"
+                }
+            }
+            else {
+                Add-Result -ControlNumber "3.3.1" -ControlTitle "Ensure Information Protection sensitivity label policies are published" `
+                           -ProfileLevel "L1" -Result "Fail" -Details "No sensitivity label policies found" `
+                           -Remediation "Create and publish sensitivity label policies in Microsoft Purview > Information Protection"
+            }
+        }
+        catch {
+            Add-Result -ControlNumber "3.3.1" -ControlTitle "Ensure Information Protection sensitivity label policies are published" `
+                       -ProfileLevel "L1" -Result "Manual" -Details "Unable to check sensitivity labels: $_. Connect to S&C PowerShell or verify in Purview portal." `
+                       -Remediation "Verify sensitivity labels in Microsoft Purview > Information Protection"
+        }
+    }
+    catch {
+        Add-Result -ControlNumber "3.3.1" -ControlTitle "Ensure Information Protection sensitivity label policies are published" `
+                   -ProfileLevel "L1" -Result "Error" -Details "Error: $_"
+    }
 }
 
 #endregion
@@ -1166,35 +1603,72 @@ function Test-EntraID {
 
     # Pre-fetch shared data for this section
     $cachedCAPolicies = $null
+    $cachedAuthPolicy = $null
     try { $cachedCAPolicies = Get-MgIdentityConditionalAccessPolicy -All } catch { Write-Log "Warning: Could not retrieve Conditional Access policies. Related checks will report errors." -Level Warning }
+    try { $cachedAuthPolicy = Get-MgPolicyAuthorizationPolicy -ErrorAction Stop } catch { Write-Log "Warning: Could not retrieve Authorization Policy. Related checks will report errors." -Level Warning }
+    $cachedDeviceRegPolicy = $null
+    try { $cachedDeviceRegPolicy = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/beta/policies/deviceRegistrationPolicy" -ErrorAction Stop } catch { Write-Log "Warning: Could not retrieve Device Registration Policy. Related checks will report errors." -Level Warning }
+    $cachedBetaAuthPolicy = $null
+    try { $cachedBetaAuthPolicy = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/beta/policies/authorizationPolicy" -ErrorAction Stop } catch { Write-Log "Warning: Could not retrieve beta Authorization Policy." -Level Warning }
 
     # 5.1.2.1 - Ensure 'Per-user MFA' is disabled
     try {
         Write-Log "Checking 5.1.2.1 - Per-user MFA disabled" -Level Info
 
-        # Use Microsoft Graph to check per-user MFA state (replaces deprecated MSOnline module)
+        # Try bulk filter first (works in some tenants), fall back to sampled per-user check
+        $perUserMfaUsers = @()
+        $bulkWorked = $false
         try {
             $perUserUri = "https://graph.microsoft.com/beta/users?`$count=true&`$filter=perUserMfaState eq 'enforced' or perUserMfaState eq 'enabled'&`$select=id,displayName,userPrincipalName"
             $perUserResponse = Invoke-MgGraphRequest -Uri $perUserUri -Method GET -Headers @{ "ConsistencyLevel" = "eventual" }
             $perUserMfaUsers = @($perUserResponse.value)
-
             while ($perUserResponse.'@odata.nextLink') {
                 $perUserResponse = Invoke-MgGraphRequest -Uri $perUserResponse.'@odata.nextLink' -Method GET -Headers @{ "ConsistencyLevel" = "eventual" }
                 $perUserMfaUsers += $perUserResponse.value
             }
+            $bulkWorked = $true
+        }
+        catch {
+            # Bulk filter not available - sample first 50 users via per-user endpoint
+            Write-Log "Bulk perUserMfaState filter unavailable, sampling users via authentication/requirements..." -Level Info
+            try {
+                $usersUri = "https://graph.microsoft.com/v1.0/users?`$select=id,userPrincipalName&`$top=50"
+                $usersResponse = Invoke-MgGraphRequest -Uri $usersUri -Method GET
+                $sampleUsers = @($usersResponse.value)
 
+                foreach ($user in $sampleUsers) {
+                    try {
+                        $req = Invoke-MgGraphRequest -Method GET `
+                            -Uri "https://graph.microsoft.com/beta/users/$($user.id)/authentication/requirements" `
+                            -ErrorAction Stop
+                        if ($req.perUserMfaState -in @('enforced','enabled')) {
+                            $perUserMfaUsers += [PSCustomObject]@{
+                                userPrincipalName = $user.userPrincipalName
+                                perUserMfaState = $req.perUserMfaState
+                            }
+                        }
+                    } catch { continue }
+                }
+                $bulkWorked = $true
+            }
+            catch {
+                Write-Log "Per-user authentication requirements endpoint also failed: $_" -Level Warning
+            }
+        }
+
+        if ($bulkWorked) {
             if ($perUserMfaUsers.Count -eq 0) {
                 Add-Result -ControlNumber "5.1.2.1" -ControlTitle "Ensure 'Per-user MFA' is disabled" `
                            -ProfileLevel "L1" -Result "Pass" -Details "No per-user MFA enabled (use Conditional Access instead)"
             }
             else {
+                $sample = ($perUserMfaUsers | Select-Object -First 5 | ForEach-Object { $_.userPrincipalName }) -join ", "
                 Add-Result -ControlNumber "5.1.2.1" -ControlTitle "Ensure 'Per-user MFA' is disabled" `
-                           -ProfileLevel "L1" -Result "Fail" -Details "$($perUserMfaUsers.Count) users have per-user MFA enabled" `
+                           -ProfileLevel "L1" -Result "Fail" -Details "$($perUserMfaUsers.Count) users have per-user MFA enabled (e.g. $sample)" `
                            -Remediation "Disable per-user MFA and use Conditional Access policies instead"
             }
         }
-        catch {
-            # Beta endpoint for perUserMfaState may not be available in all tenants
+        else {
             Add-Result -ControlNumber "5.1.2.1" -ControlTitle "Ensure 'Per-user MFA' is disabled" `
                        -ProfileLevel "L1" -Result "Manual" `
                        -Details "Per-user MFA state could not be checked via Graph API. Verify manually in Azure Portal." `
@@ -1209,7 +1683,8 @@ function Test-EntraID {
     # 5.1.2.2 - Ensure third party integrated applications are not allowed
     try {
         Write-Log "Checking 5.1.2.2 - Third party app registration" -Level Info
-        $authPolicy = Get-MgPolicyAuthorizationPolicy -ErrorAction Stop
+        if ($null -eq $cachedAuthPolicy) { throw "Authorization policy data unavailable" }
+        $authPolicy = $cachedAuthPolicy
 
         if ($authPolicy.DefaultUserRolePermissions.AllowedToCreateApps -eq $false) {
             Add-Result -ControlNumber "5.1.2.2" -ControlTitle "Ensure third party integrated applications are not allowed" `
@@ -1229,7 +1704,8 @@ function Test-EntraID {
     # 5.1.2.3 - Ensure 'Restrict non-admin users from creating tenants' is set to 'Yes'
     try {
         Write-Log "Checking 5.1.2.3 - Restrict tenant creation" -Level Info
-        $authPolicy = Get-MgPolicyAuthorizationPolicy -ErrorAction Stop
+        if ($null -eq $cachedAuthPolicy) { throw "Authorization policy data unavailable" }
+        $authPolicy = $cachedAuthPolicy
 
         if ($authPolicy.DefaultUserRolePermissions.AllowedToCreateTenants -eq $false) {
             Add-Result -ControlNumber "5.1.2.3" -ControlTitle "Ensure 'Restrict non-admin users from creating tenants' is set to 'Yes'" `
@@ -1247,11 +1723,25 @@ function Test-EntraID {
     }
 
     # 5.1.2.4 - Ensure access to the Entra admin center is restricted
-    # NOTE: This is a MANUAL control - Microsoft does not provide a Graph API to check this setting
-    # The "Restrict access to Microsoft Entra admin center" setting can only be verified through the portal
-    Add-Result -ControlNumber "5.1.2.4" -ControlTitle "Ensure access to the Entra admin center is restricted" `
-               -ProfileLevel "L1" -Result "Manual" -Details "Check Entra Admin Center > Identity > Users > User settings > 'Restrict access to Microsoft Entra admin center' should be 'Yes'" `
-               -Remediation "Navigate to Entra Admin Center > Identity > Users > User settings > Set 'Restrict access to Microsoft Entra admin center' to 'Yes'"
+    try {
+        Write-Log "Checking 5.1.2.4 - Restrict Entra admin center access" -Level Info
+        if ($null -eq $cachedBetaAuthPolicy) { throw "Beta authorization policy data unavailable" }
+        $restrictNonAdmin = $cachedBetaAuthPolicy.defaultUserRolePermissions.allowedToReadOtherUsers
+        if ($restrictNonAdmin -eq $false) {
+            Add-Result -ControlNumber "5.1.2.4" -ControlTitle "Ensure access to the Entra admin center is restricted" `
+                       -ProfileLevel "L1" -Result "Pass" -Details "Non-admin access to Entra admin center is restricted"
+        }
+        else {
+            Add-Result -ControlNumber "5.1.2.4" -ControlTitle "Ensure access to the Entra admin center is restricted" `
+                       -ProfileLevel "L1" -Result "Fail" -Details "Non-admin users can access the Entra admin center" `
+                       -Remediation "Restrict access in Entra Admin Center > Users > User settings > 'Restrict access to Microsoft Entra admin center' = Yes"
+        }
+    }
+    catch {
+        Add-Result -ControlNumber "5.1.2.4" -ControlTitle "Ensure access to the Entra admin center is restricted" `
+                   -ProfileLevel "L1" -Result "Manual" -Details "Unable to check: $_" `
+                   -Remediation "Check Entra Admin Center > Identity > Users > User settings > 'Restrict access to Microsoft Entra admin center'"
+    }
 
     # 5.1.2.5 - Ensure the option to remain signed in is hidden
     Add-Result -ControlNumber "5.1.2.5" -ControlTitle "Ensure the option to remain signed in is hidden" `
@@ -1259,9 +1749,26 @@ function Test-EntraID {
                -Remediation "Hide 'Stay signed in?' option in company branding"
 
     # 5.1.2.6 - Ensure 'LinkedIn account connections' is disabled
-    Add-Result -ControlNumber "5.1.2.6" -ControlTitle "Ensure 'LinkedIn account connections' is disabled" `
-               -ProfileLevel "L2" -Result "Manual" -Details "Check Entra Admin Center > Users > User settings" `
-               -Remediation "Disable LinkedIn account connections"
+    try {
+        Write-Log "Checking 5.1.2.6 - LinkedIn account connections" -Level Info
+        $org = Get-MgOrganization -ErrorAction Stop | Select-Object -First 1
+        $linkedInSettings = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/beta/organization/$($org.Id)/settings/microsoftApplicationDataAccess" -ErrorAction Stop
+
+        if ($linkedInSettings.isLinkedInAccountConnectionsAllowed -eq $false) {
+            Add-Result -ControlNumber "5.1.2.6" -ControlTitle "Ensure 'LinkedIn account connections' is disabled" `
+                       -ProfileLevel "L2" -Result "Pass" -Details "LinkedIn account connections are disabled"
+        }
+        else {
+            Add-Result -ControlNumber "5.1.2.6" -ControlTitle "Ensure 'LinkedIn account connections' is disabled" `
+                       -ProfileLevel "L2" -Result "Fail" -Details "LinkedIn account connections are enabled" `
+                       -Remediation "Disable LinkedIn account connections in Entra Admin Center > Users > User settings"
+        }
+    }
+    catch {
+        Add-Result -ControlNumber "5.1.2.6" -ControlTitle "Ensure 'LinkedIn account connections' is disabled" `
+                   -ProfileLevel "L2" -Result "Manual" -Details "Unable to check LinkedIn settings: $_" `
+                   -Remediation "Check Entra Admin Center > Users > User settings > LinkedIn account connections"
+    }
 
     # 5.1.3.1 - Ensure a dynamic group for guest users is created
     try {
@@ -1299,51 +1806,158 @@ function Test-EntraID {
     }
 
     # 5.1.3.2 - Ensure users cannot create security groups (NEW in v6.0.0)
-    Write-Log "Checking 5.1.3.2 - Users cannot create security groups" -Level Info
-    Add-Result -ControlNumber "5.1.3.2" -ControlTitle "Ensure users cannot create security groups" `
-               -ProfileLevel "L1" -Result "Manual" -Details "Manual verification required. Check Entra Admin Center > Groups > General > Security groups" `
-               -Remediation "Restrict ability to create security groups to admins only in Entra Admin Center > Groups > General"
+    try {
+        Write-Log "Checking 5.1.3.2 - Users cannot create security groups" -Level Info
+        if ($null -eq $cachedAuthPolicy) { throw "Authorization policy data unavailable" }
+
+        if ($cachedAuthPolicy.DefaultUserRolePermissions.AllowedToCreateSecurityGroups -eq $false) {
+            Add-Result -ControlNumber "5.1.3.2" -ControlTitle "Ensure users cannot create security groups" `
+                       -ProfileLevel "L1" -Result "Pass" -Details "Users cannot create security groups (AllowedToCreateSecurityGroups = false)"
+        }
+        else {
+            Add-Result -ControlNumber "5.1.3.2" -ControlTitle "Ensure users cannot create security groups" `
+                       -ProfileLevel "L1" -Result "Fail" -Details "Users can create security groups (AllowedToCreateSecurityGroups = $($cachedAuthPolicy.DefaultUserRolePermissions.AllowedToCreateSecurityGroups))" `
+                       -Remediation "Restrict security group creation in Entra Admin Center > Groups > General"
+        }
+    }
+    catch {
+        Add-Result -ControlNumber "5.1.3.2" -ControlTitle "Ensure users cannot create security groups" `
+                   -ProfileLevel "L1" -Result "Manual" -Details "Unable to check: $_" `
+                   -Remediation "Check Entra Admin Center > Groups > General > Security groups"
+    }
 
     # 5.1.4.1 - Ensure the ability to join devices to Entra is restricted (NEW in v6.0.0)
-    Write-Log "Checking 5.1.4.1 - Device join restriction" -Level Info
-    Add-Result -ControlNumber "5.1.4.1" -ControlTitle "Ensure the ability to join devices to Entra is restricted" `
-               -ProfileLevel "L2" -Result "Manual" -Details "Manual verification required. Check Entra Admin Center > Devices > Device settings" `
-               -Remediation "Set 'Users may join devices to Microsoft Entra' to 'Selected' or 'None' in Entra Admin Center > Devices > Device settings"
+    try {
+        Write-Log "Checking 5.1.4.1 - Device join restriction" -Level Info
+        if ($null -eq $cachedDeviceRegPolicy) { throw "Device registration policy data unavailable" }
+        $joinSetting = $cachedDeviceRegPolicy.azureADJoin.allowedToJoin.'@odata.type'
+        if ($joinSetting -ne "#microsoft.graph.allDeviceRegistrationMembership") {
+            Add-Result -ControlNumber "5.1.4.1" -ControlTitle "Ensure the ability to join devices to Entra is restricted" `
+                       -ProfileLevel "L2" -Result "Pass" -Details "Device join is restricted (not set to All)"
+        }
+        else {
+            Add-Result -ControlNumber "5.1.4.1" -ControlTitle "Ensure the ability to join devices to Entra is restricted" `
+                       -ProfileLevel "L2" -Result "Fail" -Details "All users can join devices to Entra" `
+                       -Remediation "Set 'Users may join devices to Microsoft Entra' to 'Selected' in Entra Admin Center > Devices > Device settings"
+        }
+    }
+    catch {
+        Add-Result -ControlNumber "5.1.4.1" -ControlTitle "Ensure the ability to join devices to Entra is restricted" `
+                   -ProfileLevel "L2" -Result "Manual" -Details "Unable to check: $_" `
+                   -Remediation "Check Entra Admin Center > Devices > Device settings"
+    }
 
     # 5.1.4.2 - Ensure the maximum number of devices per user is limited (NEW in v6.0.0)
-    Write-Log "Checking 5.1.4.2 - Max devices per user limited" -Level Info
-    Add-Result -ControlNumber "5.1.4.2" -ControlTitle "Ensure the maximum number of devices per user is limited" `
-               -ProfileLevel "L1" -Result "Manual" -Details "Manual verification required. Check Entra Admin Center > Devices > Device settings" `
-               -Remediation "Set the maximum number of devices per user to an appropriate limit in Entra Admin Center > Devices > Device settings"
+    try {
+        Write-Log "Checking 5.1.4.2 - Max devices per user limited" -Level Info
+        if ($null -eq $cachedDeviceRegPolicy) { throw "Device registration policy data unavailable" }
+        $quota = $cachedDeviceRegPolicy.userDeviceQuota
+        if ($quota -and $quota -le 20) {
+            Add-Result -ControlNumber "5.1.4.2" -ControlTitle "Ensure the maximum number of devices per user is limited" `
+                       -ProfileLevel "L1" -Result "Pass" -Details "Device quota per user: $quota"
+        }
+        else {
+            Add-Result -ControlNumber "5.1.4.2" -ControlTitle "Ensure the maximum number of devices per user is limited" `
+                       -ProfileLevel "L1" -Result "Fail" -Details "Device quota per user: $quota (should be 20 or less)" `
+                       -Remediation "Limit max devices per user in Entra Admin Center > Devices > Device settings"
+        }
+    }
+    catch {
+        Add-Result -ControlNumber "5.1.4.2" -ControlTitle "Ensure the maximum number of devices per user is limited" `
+                   -ProfileLevel "L1" -Result "Manual" -Details "Unable to check: $_" `
+                   -Remediation "Check Entra Admin Center > Devices > Device settings"
+    }
 
     # 5.1.4.3 - Ensure the GA role is not added as a local administrator during Entra join (NEW in v6.0.0)
-    Write-Log "Checking 5.1.4.3 - GA not local admin on Entra join" -Level Info
-    Add-Result -ControlNumber "5.1.4.3" -ControlTitle "Ensure the GA role is not added as a local administrator during Entra join" `
-               -ProfileLevel "L1" -Result "Manual" -Details "Manual verification required. Check Entra Admin Center > Devices > Device settings > Local admin settings" `
-               -Remediation "Disable Global Administrator as local admin during Entra join in Device settings > Local admin settings"
+    try {
+        Write-Log "Checking 5.1.4.3 - GA not local admin on Entra join" -Level Info
+        if ($null -eq $cachedDeviceRegPolicy) { throw "Device registration policy data unavailable" }
+        $gaLocalAdmin = $cachedDeviceRegPolicy.azureADJoin.localAdmins.enableGlobalAdmins
+        if ($gaLocalAdmin -eq $false) {
+            Add-Result -ControlNumber "5.1.4.3" -ControlTitle "Ensure the GA role is not added as a local administrator during Entra join" `
+                       -ProfileLevel "L1" -Result "Pass" -Details "Global Administrators are NOT added as local admins during Entra join"
+        }
+        else {
+            Add-Result -ControlNumber "5.1.4.3" -ControlTitle "Ensure the GA role is not added as a local administrator during Entra join" `
+                       -ProfileLevel "L1" -Result "Fail" -Details "Global Administrators ARE added as local admins during Entra join" `
+                       -Remediation "Disable GA as local admin in Entra Admin Center > Devices > Device settings > Local admin settings"
+        }
+    }
+    catch {
+        Add-Result -ControlNumber "5.1.4.3" -ControlTitle "Ensure the GA role is not added as a local administrator during Entra join" `
+                   -ProfileLevel "L1" -Result "Manual" -Details "Unable to check: $_" `
+                   -Remediation "Check Entra Admin Center > Devices > Device settings > Local admin settings"
+    }
 
     # 5.1.4.4 - Ensure local administrator assignment is limited during Entra join (NEW in v6.0.0)
-    Write-Log "Checking 5.1.4.4 - Local admin assignment limited" -Level Info
-    Add-Result -ControlNumber "5.1.4.4" -ControlTitle "Ensure local administrator assignment is limited during Entra join" `
-               -ProfileLevel "L1" -Result "Manual" -Details "Manual verification required. Check Entra Admin Center > Devices > Device settings > Local admin settings" `
-               -Remediation "Limit local administrator assignment to specific roles during Entra join"
+    try {
+        Write-Log "Checking 5.1.4.4 - Local admin assignment limited" -Level Info
+        if ($null -eq $cachedDeviceRegPolicy) { throw "Device registration policy data unavailable" }
+        $registeringUsers = $cachedDeviceRegPolicy.azureADJoin.localAdmins.registeringUsers
+        $registrationAllowed = $registeringUsers.additionalAdministratorsCount
+        if ($registeringUsers -and $registeringUsers.'@odata.type' -ne "#microsoft.graph.allDeviceRegistrationMembership") {
+            Add-Result -ControlNumber "5.1.4.4" -ControlTitle "Ensure local administrator assignment is limited during Entra join" `
+                       -ProfileLevel "L1" -Result "Pass" -Details "Local admin assignment during Entra join is restricted"
+        }
+        else {
+            Add-Result -ControlNumber "5.1.4.4" -ControlTitle "Ensure local administrator assignment is limited during Entra join" `
+                       -ProfileLevel "L1" -Result "Fail" -Details "Local admin assignment during Entra join is not restricted" `
+                       -Remediation "Limit local admin assignment in Entra Admin Center > Devices > Device settings > Local admin settings"
+        }
+    }
+    catch {
+        Add-Result -ControlNumber "5.1.4.4" -ControlTitle "Ensure local administrator assignment is limited during Entra join" `
+                   -ProfileLevel "L1" -Result "Manual" -Details "Unable to check: $_" `
+                   -Remediation "Check Entra Admin Center > Devices > Device settings > Local admin settings"
+    }
 
     # 5.1.4.5 - Ensure Local Administrator Password Solution is enabled (NEW in v6.0.0)
-    Write-Log "Checking 5.1.4.5 - LAPS enabled" -Level Info
-    Add-Result -ControlNumber "5.1.4.5" -ControlTitle "Ensure Local Administrator Password Solution is enabled" `
-               -ProfileLevel "L1" -Result "Manual" -Details "Manual verification required. Check Entra Admin Center > Devices > Device settings > Enable Microsoft Entra Local Administrator Password Solution (LAPS)" `
-               -Remediation "Enable Microsoft Entra Local Administrator Password Solution (LAPS) in Entra Admin Center > Devices > Device settings"
+    try {
+        Write-Log "Checking 5.1.4.5 - LAPS enabled" -Level Info
+        if ($null -eq $cachedDeviceRegPolicy) { throw "Device registration policy data unavailable" }
+        $lapsEnabled = $cachedDeviceRegPolicy.localAdminPassword.isEnabled
+        if ($lapsEnabled -eq $true) {
+            Add-Result -ControlNumber "5.1.4.5" -ControlTitle "Ensure Local Administrator Password Solution is enabled" `
+                       -ProfileLevel "L1" -Result "Pass" -Details "Microsoft Entra LAPS is enabled"
+        }
+        else {
+            Add-Result -ControlNumber "5.1.4.5" -ControlTitle "Ensure Local Administrator Password Solution is enabled" `
+                       -ProfileLevel "L1" -Result "Fail" -Details "Microsoft Entra LAPS is not enabled" `
+                       -Remediation "Enable LAPS in Entra Admin Center > Devices > Device settings"
+        }
+    }
+    catch {
+        Add-Result -ControlNumber "5.1.4.5" -ControlTitle "Ensure Local Administrator Password Solution is enabled" `
+                   -ProfileLevel "L1" -Result "Manual" -Details "Unable to check: $_" `
+                   -Remediation "Check Entra Admin Center > Devices > Device settings > Enable LAPS"
+    }
 
     # 5.1.4.6 - Ensure users are restricted from recovering BitLocker keys (NEW in v6.0.0)
-    Write-Log "Checking 5.1.4.6 - BitLocker key recovery restricted" -Level Info
-    Add-Result -ControlNumber "5.1.4.6" -ControlTitle "Ensure users are restricted from recovering BitLocker keys" `
-               -ProfileLevel "L2" -Result "Manual" -Details "Manual verification required. Check Entra Admin Center > Devices > Device settings > Restrict users from recovering BitLocker keys" `
-               -Remediation "Set 'Restrict users from recovering the BitLocker key(s) for their owned devices' to 'Yes' in Entra Admin Center > Devices > Device settings"
+    try {
+        Write-Log "Checking 5.1.4.6 - BitLocker key recovery restricted" -Level Info
+        if ($null -eq $cachedBetaAuthPolicy) { throw "Beta authorization policy data unavailable" }
+        $bitlockerRestriction = $cachedBetaAuthPolicy.defaultUserRolePermissions.allowedToReadBitlockerKeysForOwnedDevice
+        if ($bitlockerRestriction -eq $false) {
+            Add-Result -ControlNumber "5.1.4.6" -ControlTitle "Ensure users are restricted from recovering BitLocker keys" `
+                       -ProfileLevel "L2" -Result "Pass" -Details "Users are restricted from recovering BitLocker keys for their owned devices"
+        }
+        else {
+            Add-Result -ControlNumber "5.1.4.6" -ControlTitle "Ensure users are restricted from recovering BitLocker keys" `
+                       -ProfileLevel "L2" -Result "Fail" -Details "Users can recover BitLocker keys for their owned devices" `
+                       -Remediation "Set 'Restrict users from recovering BitLocker keys' to 'Yes' in Entra Admin Center > Devices > Device settings"
+        }
+    }
+    catch {
+        Add-Result -ControlNumber "5.1.4.6" -ControlTitle "Ensure users are restricted from recovering BitLocker keys" `
+                   -ProfileLevel "L2" -Result "Manual" -Details "Unable to check: $_" `
+                   -Remediation "Check Entra Admin Center > Devices > Device settings > Restrict users from recovering BitLocker keys"
+    }
 
     # 5.1.5.1 - Ensure user consent to apps accessing company data on their behalf is not allowed
     try {
         Write-Log "Checking 5.1.5.1 - User consent disabled" -Level Info
-        $authPolicy = Get-MgPolicyAuthorizationPolicy -ErrorAction Stop
+        if ($null -eq $cachedAuthPolicy) { throw "Authorization policy data unavailable" }
+        $authPolicy = $cachedAuthPolicy
 
         # Get the permission grant policies assigned to default user role
         $consentPolicies = $authPolicy.DefaultUserRolePermissions.PermissionGrantPoliciesAssigned
@@ -1385,19 +1999,58 @@ function Test-EntraID {
     }
 
     # 5.1.5.2 - Ensure the admin consent workflow is enabled
-    Add-Result -ControlNumber "5.1.5.2" -ControlTitle "Ensure the admin consent workflow is enabled" `
-               -ProfileLevel "L1" -Result "Manual" -Details "Check Entra Admin Center > Enterprise applications > Admin consent requests" `
-               -Remediation "Enable admin consent workflow"
+    try {
+        Write-Log "Checking 5.1.5.2 - Admin consent workflow" -Level Info
+        $consentPolicy = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/policies/adminConsentRequestPolicy" -ErrorAction Stop
+
+        if ($consentPolicy.isEnabled -eq $true) {
+            Add-Result -ControlNumber "5.1.5.2" -ControlTitle "Ensure the admin consent workflow is enabled" `
+                       -ProfileLevel "L1" -Result "Pass" -Details "Admin consent workflow is enabled"
+        }
+        else {
+            Add-Result -ControlNumber "5.1.5.2" -ControlTitle "Ensure the admin consent workflow is enabled" `
+                       -ProfileLevel "L1" -Result "Fail" -Details "Admin consent workflow is disabled" `
+                       -Remediation "Enable admin consent workflow in Entra Admin Center > Enterprise applications > Admin consent requests"
+        }
+    }
+    catch {
+        Add-Result -ControlNumber "5.1.5.2" -ControlTitle "Ensure the admin consent workflow is enabled" `
+                   -ProfileLevel "L1" -Result "Manual" -Details "Unable to check: $_" `
+                   -Remediation "Check Entra Admin Center > Enterprise applications > Admin consent requests"
+    }
 
     # 5.1.6.1 - Ensure that collaboration invitations are sent to allowed domains only
-    Add-Result -ControlNumber "5.1.6.1" -ControlTitle "Ensure that collaboration invitations are sent to allowed domains only" `
-               -ProfileLevel "L2" -Result "Manual" -Details "Check External Identities > External collaboration settings" `
-               -Remediation "Configure allowed/denied domain list for B2B collaboration"
+    try {
+        Write-Log "Checking 5.1.6.1 - Collaboration invitations domain restriction" -Level Info
+        if ($null -eq $cachedAuthPolicy) { throw "Authorization policy data unavailable" }
+
+        $allowInvitesFrom = $cachedAuthPolicy.AllowInvitesFrom
+        $crossTenantPolicy = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/policies/crossTenantAccessPolicy/default" -ErrorAction Stop
+
+        $invitesRestricted = ($allowInvitesFrom -eq "adminsAndGuestInviters" -or $allowInvitesFrom -eq "adminsOnly")
+        $hasInboundRestriction = $crossTenantPolicy.b2bCollaborationInbound -and $crossTenantPolicy.b2bCollaborationInbound.applications
+
+        if ($invitesRestricted) {
+            Add-Result -ControlNumber "5.1.6.1" -ControlTitle "Ensure that collaboration invitations are sent to allowed domains only" `
+                       -ProfileLevel "L2" -Result "Pass" -Details "Invitations restricted to: $allowInvitesFrom. Cross-tenant policy configured."
+        }
+        else {
+            Add-Result -ControlNumber "5.1.6.1" -ControlTitle "Ensure that collaboration invitations are sent to allowed domains only" `
+                       -ProfileLevel "L2" -Result "Fail" -Details "Invitations too permissive: $allowInvitesFrom" `
+                       -Remediation "Configure allowed/denied domain list in External Identities > External collaboration settings"
+        }
+    }
+    catch {
+        Add-Result -ControlNumber "5.1.6.1" -ControlTitle "Ensure that collaboration invitations are sent to allowed domains only" `
+                   -ProfileLevel "L2" -Result "Manual" -Details "Unable to check: $_" `
+                   -Remediation "Check External Identities > External collaboration settings"
+    }
 
     # 5.1.6.2 - Ensure that guest user access is restricted
     try {
         Write-Log "Checking 5.1.6.2 - Guest user access restricted" -Level Info
-        $authPolicy = Get-MgPolicyAuthorizationPolicy -ErrorAction Stop
+        if ($null -eq $cachedAuthPolicy) { throw "Authorization policy data unavailable" }
+        $authPolicy = $cachedAuthPolicy
 
         # Guest user role should be restricted:
         # '10dae51f-b6af-4016-8d66-8c2a99b929b3' = Guest users have limited access to properties and memberships of directory objects
@@ -1420,7 +2073,8 @@ function Test-EntraID {
     # 5.1.6.3 - Ensure guest user invitations are limited to the Guest Inviter role
     try {
         Write-Log "Checking 5.1.6.3 - Guest inviter role restriction" -Level Info
-        $authPolicy = Get-MgPolicyAuthorizationPolicy -ErrorAction Stop
+        if ($null -eq $cachedAuthPolicy) { throw "Authorization policy data unavailable" }
+        $authPolicy = $cachedAuthPolicy
 
         # Acceptable values (in order from most restrictive to least restrictive that still passes):
         # - adminsOnly: Only Global Admins can invite (most restrictive - compliant)
@@ -1453,9 +2107,49 @@ function Test-EntraID {
     }
 
     # 5.1.8.1 - Ensure that password hash sync is enabled for hybrid deployments
-    Add-Result -ControlNumber "5.1.8.1" -ControlTitle "Ensure that password hash sync is enabled for hybrid deployments" `
-               -ProfileLevel "L1" -Result "Manual" -Details "Verify in Azure AD Connect configuration (if hybrid deployment)" `
-               -Remediation "Enable password hash synchronization in Azure AD Connect"
+    try {
+        Write-Log "Checking 5.1.8.1 - Password hash sync for hybrid" -Level Info
+        $org = Get-MgOrganization -ErrorAction Stop
+        $isHybrid = $org.OnPremisesSyncEnabled
+
+        if (-not $isHybrid) {
+            Add-Result -ControlNumber "5.1.8.1" -ControlTitle "Ensure that password hash sync is enabled for hybrid deployments" `
+                       -ProfileLevel "L1" -Result "Pass" -Details "Cloud-only tenant (no hybrid deployment) - control not applicable"
+        }
+        else {
+            # Hybrid tenant - check password hash sync
+            try {
+                $syncConfig = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/directory/onPremisesSynchronization" -ErrorAction Stop
+                $syncItems = @($syncConfig.value)
+                $phsEnabled = $false
+                foreach ($item in $syncItems) {
+                    if ($item.features.passwordHashSyncEnabled -eq $true) {
+                        $phsEnabled = $true
+                        break
+                    }
+                }
+                if ($phsEnabled) {
+                    Add-Result -ControlNumber "5.1.8.1" -ControlTitle "Ensure that password hash sync is enabled for hybrid deployments" `
+                               -ProfileLevel "L1" -Result "Pass" -Details "Password hash sync is enabled for hybrid deployment"
+                }
+                else {
+                    Add-Result -ControlNumber "5.1.8.1" -ControlTitle "Ensure that password hash sync is enabled for hybrid deployments" `
+                               -ProfileLevel "L1" -Result "Fail" -Details "Hybrid deployment detected but password hash sync is not enabled" `
+                               -Remediation "Enable password hash synchronization in Azure AD Connect"
+                }
+            }
+            catch {
+                Add-Result -ControlNumber "5.1.8.1" -ControlTitle "Ensure that password hash sync is enabled for hybrid deployments" `
+                           -ProfileLevel "L1" -Result "Manual" -Details "Hybrid deployment detected but unable to verify password hash sync: $_" `
+                           -Remediation "Verify password hash sync is enabled in Azure AD Connect configuration"
+            }
+        }
+    }
+    catch {
+        Add-Result -ControlNumber "5.1.8.1" -ControlTitle "Ensure that password hash sync is enabled for hybrid deployments" `
+                   -ProfileLevel "L1" -Result "Manual" -Details "Unable to determine deployment type: $_" `
+                   -Remediation "Enable password hash synchronization in Azure AD Connect"
+    }
 
     # Conditional Access Policies (5.2.2.x)
     Write-Log "Checking Conditional Access policies..." -Level Info
@@ -1577,7 +2271,7 @@ function Test-EntraID {
 
         foreach ($policy in $caPolicies) {
             if ($policy.State -eq "enabled" -and
-                ($policy.Conditions.Users.IncludeUsers -contains "All" -or $policy.Conditions.Users.IncludeGroups) -and
+                $policy.Conditions.Users.IncludeUsers -contains "All" -and
                 $policy.GrantControls.BuiltInControls -contains "mfa") {
                 $allUserMfaPolicy = $policy
                 break
@@ -1613,7 +2307,7 @@ function Test-EntraID {
         else {
             $reportOnlyPolicy = $caPolicies | Where-Object {
                 $_.State -eq "enabledForReportingButNotEnforced" -and
-                ($_.Conditions.Users.IncludeUsers -contains "All" -or $_.Conditions.Users.IncludeGroups) -and
+                $_.Conditions.Users.IncludeUsers -contains "All" -and
                 $_.GrantControls.BuiltInControls -contains "mfa"
             }
 
@@ -1736,32 +2430,81 @@ function Test-EntraID {
     }
 
     # 5.2.2.5 - Ensure 'Phishing-resistant MFA strength' is required for Administrators
-    Add-Result -ControlNumber "5.2.2.5" -ControlTitle "Ensure 'Phishing-resistant MFA strength' is required for Administrators" `
-               -ProfileLevel "L2" -Result "Manual" -Details "Verify CA policy requires phishing-resistant MFA (FIDO2/certificate) for admins" `
-               -Remediation "Create CA policy requiring phishing-resistant authentication for administrators"
+    try {
+        Write-Log "Checking 5.2.2.5 - Phishing-resistant MFA for admins" -Level Info
+        if ($null -eq $cachedCAPolicies) { throw "Conditional Access policy data unavailable" }
+        $phishResistantPolicy = $null
+        # Phishing-resistant MFA strength ID
+        $phishResistantStrengthId = "00000000-0000-0000-0000-000000000004"
+        # Admin role template IDs to check
+        $adminRoleIds = @(
+            "62e90394-69f5-4237-9190-012177145e10", # Global Administrator
+            "e8611ab8-c189-46e8-94e1-60213ab1f814", # Privileged Role Administrator
+            "194ae4cb-b126-40b2-bd5b-6091b380977d", # Security Administrator
+            "f28a1f50-f6e7-4571-818b-6a12f2af6b6c", # SharePoint Administrator
+            "29232cdf-9323-42fd-ade2-1d097af3e4de", # Exchange Administrator
+            "fe930be7-5e62-47db-91af-98c3a49a38b1", # User Administrator
+            "b0f54661-2d74-4c50-afa3-1ec803f12efe"  # Billing Administrator
+        )
+
+        foreach ($policy in $cachedCAPolicies) {
+            if ($policy.State -ne "enabled") { continue }
+            # Check if policy targets admin roles
+            $includeRoles = @($policy.Conditions.Users.IncludeRoles)
+            $targetsAdmins = $false
+            foreach ($roleId in $adminRoleIds) {
+                if ($includeRoles -contains $roleId) { $targetsAdmins = $true; break }
+            }
+            if (-not $targetsAdmins) { continue }
+            # Check for phishing-resistant authentication strength
+            $authStrength = $policy.GrantControls.AuthenticationStrength
+            if ($authStrength -and $authStrength.Id -eq $phishResistantStrengthId) {
+                $phishResistantPolicy = $policy
+                break
+            }
+        }
+
+        if ($phishResistantPolicy) {
+            Add-Result -ControlNumber "5.2.2.5" -ControlTitle "Ensure 'Phishing-resistant MFA strength' is required for Administrators" `
+                       -ProfileLevel "L2" -Result "Pass" -Details "CA policy '$($phishResistantPolicy.DisplayName)' requires phishing-resistant MFA for admin roles"
+        }
+        else {
+            Add-Result -ControlNumber "5.2.2.5" -ControlTitle "Ensure 'Phishing-resistant MFA strength' is required for Administrators" `
+                       -ProfileLevel "L2" -Result "Fail" -Details "No CA policy found requiring phishing-resistant MFA strength for admin roles" `
+                       -Remediation "Create CA policy targeting admin roles with authentication strength set to 'Phishing-resistant MFA'"
+        }
+    }
+    catch {
+        Add-Result -ControlNumber "5.2.2.5" -ControlTitle "Ensure 'Phishing-resistant MFA strength' is required for Administrators" `
+                   -ProfileLevel "L2" -Result "Manual" -Details "Unable to check: $_" `
+                   -Remediation "Verify CA policy requires phishing-resistant MFA (FIDO2/certificate-based) for administrators"
+    }
 
     # 5.2.2.6 - Enable Identity Protection user risk policies
     try {
         Write-Log "Checking 5.2.2.6 - User risk policy" -Level Info
         if ($null -eq $cachedCAPolicies) { throw "Conditional Access policy data unavailable" }
         $caPolicies = $cachedCAPolicies
-        $userRiskPolicy = $false
+        $userRiskPolicy = $null
 
         foreach ($policy in $caPolicies) {
-            if ($policy.State -eq "enabled" -and $policy.Conditions.UserRiskLevels) {
-                $userRiskPolicy = $true
+            if ($policy.State -eq "enabled" -and
+                $policy.Conditions.UserRiskLevels -and
+                ($policy.Conditions.UserRiskLevels -contains "high" -or $policy.Conditions.UserRiskLevels -contains "medium")) {
+                $userRiskPolicy = $policy
                 break
             }
         }
 
         if ($userRiskPolicy) {
+            $riskLevels = $userRiskPolicy.Conditions.UserRiskLevels -join ", "
             Add-Result -ControlNumber "5.2.2.6" -ControlTitle "Enable Identity Protection user risk policies" `
-                       -ProfileLevel "L1" -Result "Pass" -Details "User risk policy enabled"
+                       -ProfileLevel "L1" -Result "Pass" -Details "User risk policy enabled targeting risk levels: $riskLevels"
         }
         else {
             Add-Result -ControlNumber "5.2.2.6" -ControlTitle "Enable Identity Protection user risk policies" `
-                       -ProfileLevel "L1" -Result "Fail" -Details "No user risk policy found" `
-                       -Remediation "Create CA policy based on user risk level"
+                       -ProfileLevel "L1" -Result "Fail" -Details "No user risk policy targeting high or medium risk found" `
+                       -Remediation "Create CA policy based on user risk level (target high and medium risk)"
         }
     }
     catch {
@@ -1774,23 +2517,26 @@ function Test-EntraID {
         Write-Log "Checking 5.2.2.7 - Sign-in risk policy" -Level Info
         if ($null -eq $cachedCAPolicies) { throw "Conditional Access policy data unavailable" }
         $caPolicies = $cachedCAPolicies
-        $signInRiskPolicy = $false
+        $signInRiskPolicy = $null
 
         foreach ($policy in $caPolicies) {
-            if ($policy.State -eq "enabled" -and $policy.Conditions.SignInRiskLevels) {
-                $signInRiskPolicy = $true
+            if ($policy.State -eq "enabled" -and
+                $policy.Conditions.SignInRiskLevels -and
+                ($policy.Conditions.SignInRiskLevels -contains "high" -or $policy.Conditions.SignInRiskLevels -contains "medium")) {
+                $signInRiskPolicy = $policy
                 break
             }
         }
 
         if ($signInRiskPolicy) {
+            $riskLevels = $signInRiskPolicy.Conditions.SignInRiskLevels -join ", "
             Add-Result -ControlNumber "5.2.2.7" -ControlTitle "Enable Identity Protection sign-in risk policies" `
-                       -ProfileLevel "L1" -Result "Pass" -Details "Sign-in risk policy enabled"
+                       -ProfileLevel "L1" -Result "Pass" -Details "Sign-in risk policy enabled targeting risk levels: $riskLevels"
         }
         else {
             Add-Result -ControlNumber "5.2.2.7" -ControlTitle "Enable Identity Protection sign-in risk policies" `
-                       -ProfileLevel "L1" -Result "Fail" -Details "No sign-in risk policy found" `
-                       -Remediation "Create CA policy based on sign-in risk level"
+                       -ProfileLevel "L1" -Result "Fail" -Details "No sign-in risk policy targeting high or medium risk found" `
+                       -Remediation "Create CA policy based on sign-in risk level (target high and medium risk)"
         }
     }
     catch {
@@ -1799,34 +2545,68 @@ function Test-EntraID {
     }
 
     # 5.2.2.8 - Ensure 'sign-in risk' is blocked for medium and high risk
-    Add-Result -ControlNumber "5.2.2.8" -ControlTitle "Ensure 'sign-in risk' is blocked for medium and high risk" `
-               -ProfileLevel "L2" -Result "Manual" -Details "Verify sign-in risk policy blocks medium/high risk" `
-               -Remediation "Configure sign-in risk policy to block medium and high risk"
+    try {
+        Write-Log "Checking 5.2.2.8 - Sign-in risk blocked for medium+high" -Level Info
+        if ($null -eq $cachedCAPolicies) { throw "Conditional Access policy data unavailable" }
+        $blockRiskPolicy = $null
+
+        foreach ($policy in $cachedCAPolicies) {
+            if ($policy.State -eq "enabled" -and
+                $policy.Conditions.SignInRiskLevels -and
+                ($policy.Conditions.SignInRiskLevels -contains "medium") -and
+                ($policy.Conditions.SignInRiskLevels -contains "high") -and
+                $policy.GrantControls.BuiltInControls -and
+                ($policy.GrantControls.BuiltInControls -contains "block")) {
+                $blockRiskPolicy = $policy
+                break
+            }
+        }
+
+        if ($blockRiskPolicy) {
+            $riskLevels = $blockRiskPolicy.Conditions.SignInRiskLevels -join ", "
+            Add-Result -ControlNumber "5.2.2.8" -ControlTitle "Ensure 'sign-in risk' is blocked for medium and high risk" `
+                       -ProfileLevel "L2" -Result "Pass" -Details "CA policy '$($blockRiskPolicy.DisplayName)' blocks sign-in for risk levels: $riskLevels"
+        }
+        else {
+            Add-Result -ControlNumber "5.2.2.8" -ControlTitle "Ensure 'sign-in risk' is blocked for medium and high risk" `
+                       -ProfileLevel "L2" -Result "Fail" -Details "No CA policy found that blocks sign-in for both medium and high risk levels" `
+                       -Remediation "Create CA policy that blocks access when sign-in risk is medium or high"
+        }
+    }
+    catch {
+        Add-Result -ControlNumber "5.2.2.8" -ControlTitle "Ensure 'sign-in risk' is blocked for medium and high risk" `
+                   -ProfileLevel "L2" -Result "Manual" -Details "Unable to check: $_" `
+                   -Remediation "Configure CA policy to block sign-in risk at medium and high levels"
+    }
 
     # 5.2.2.9 - Ensure a managed device is required for authentication
     try {
         Write-Log "Checking 5.2.2.9 - Managed device required" -Level Info
         if ($null -eq $cachedCAPolicies) { throw "Conditional Access policy data unavailable" }
         $caPolicies = $cachedCAPolicies
-        $managedDevicePolicy = $false
+        $managedDevicePolicy = $null
 
         foreach ($policy in $caPolicies) {
             if ($policy.State -eq "enabled" -and
                 ($policy.GrantControls.BuiltInControls -contains "compliantDevice" -or
-                 $policy.GrantControls.BuiltInControls -contains "domainJoinedDevice")) {
-                $managedDevicePolicy = $true
+                 $policy.GrantControls.BuiltInControls -contains "domainJoinedDevice") -and
+                ($policy.Conditions.Users.IncludeUsers -contains "All" -or
+                 $policy.Conditions.Applications.IncludeApplications -contains "All")) {
+                $managedDevicePolicy = $policy
                 break
             }
         }
 
         if ($managedDevicePolicy) {
+            $deviceReq = if ($managedDevicePolicy.GrantControls.BuiltInControls -contains "compliantDevice") { "Compliant device" } else { "Domain-joined device" }
+            $scope = if ($managedDevicePolicy.Conditions.Users.IncludeUsers -contains "All") { "all users" } else { "all cloud apps" }
             Add-Result -ControlNumber "5.2.2.9" -ControlTitle "Ensure a managed device is required for authentication" `
-                       -ProfileLevel "L1" -Result "Pass" -Details "Managed device requirement configured"
+                       -ProfileLevel "L1" -Result "Pass" -Details "Managed device requirement configured ($deviceReq for $scope)"
         }
         else {
             Add-Result -ControlNumber "5.2.2.9" -ControlTitle "Ensure a managed device is required for authentication" `
-                       -ProfileLevel "L1" -Result "Fail" -Details "No managed device requirement found" `
-                       -Remediation "Create CA policy requiring compliant or Hybrid Azure AD joined device"
+                       -ProfileLevel "L1" -Result "Fail" -Details "No CA policy requiring managed device for all users or all cloud apps" `
+                       -Remediation "Create CA policy targeting all users or all cloud apps requiring compliant or Hybrid Azure AD joined device"
         }
     }
     catch {
@@ -2074,9 +2854,61 @@ function Test-EntraID {
     }
 
     # 5.2.3.3 - Ensure password protection is enabled for on-prem Active Directory
-    Add-Result -ControlNumber "5.2.3.3" -ControlTitle "Ensure password protection is enabled for on-prem Active Directory" `
-               -ProfileLevel "L1" -Result "Manual" -Details "Verify Azure AD Password Protection agent installed on-premises (if hybrid)" `
-               -Remediation "Install and configure Azure AD Password Protection for on-premises AD"
+    try {
+        Write-Log "Checking 5.2.3.3 - Password protection on-prem AD" -Level Info
+        $org = Get-MgOrganization -ErrorAction Stop
+        $isHybrid = $org.OnPremisesSyncEnabled
+
+        if (-not $isHybrid) {
+            Add-Result -ControlNumber "5.2.3.3" -ControlTitle "Ensure password protection is enabled for on-prem Active Directory" `
+                       -ProfileLevel "L1" -Result "Pass" -Details "Cloud-only tenant (no hybrid deployment) - control not applicable"
+        }
+        else {
+            # Hybrid tenant - check password protection on-prem settings via directory settings
+            try {
+                $passwordPolicy = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/beta/settings" -ErrorAction Stop
+                $passwordSetting = $passwordPolicy.value | Where-Object {
+                    $_.displayName -eq "Password Rule Settings" -or
+                    $_.templateId -eq "5cf42378-d67d-4f36-ba46-e8b86229381d"
+                }
+
+                if ($passwordSetting) {
+                    $onPremEnabled = ($passwordSetting.values | Where-Object { $_.name -eq "EnableBannedPasswordCheckOnPremises" }).value
+                    $onPremMode = ($passwordSetting.values | Where-Object { $_.name -eq "BannedPasswordCheckOnPremisesMode" }).value
+
+                    if ($onPremEnabled -eq "True" -and $onPremMode -eq "Enforce") {
+                        Add-Result -ControlNumber "5.2.3.3" -ControlTitle "Ensure password protection is enabled for on-prem Active Directory" `
+                                   -ProfileLevel "L1" -Result "Pass" -Details "On-prem password protection enabled in Enforce mode"
+                    }
+                    elseif ($onPremEnabled -eq "True") {
+                        Add-Result -ControlNumber "5.2.3.3" -ControlTitle "Ensure password protection is enabled for on-prem Active Directory" `
+                                   -ProfileLevel "L1" -Result "Fail" -Details "On-prem password protection enabled but in '$onPremMode' mode (should be 'Enforce')" `
+                                   -Remediation "Set password protection to 'Enforce' mode in Entra ID > Security > Authentication methods > Password protection"
+                    }
+                    else {
+                        Add-Result -ControlNumber "5.2.3.3" -ControlTitle "Ensure password protection is enabled for on-prem Active Directory" `
+                                   -ProfileLevel "L1" -Result "Fail" -Details "On-prem password protection is not enabled" `
+                                   -Remediation "Enable password protection for on-premises AD in Entra ID > Security > Authentication methods > Password protection"
+                    }
+                }
+                else {
+                    Add-Result -ControlNumber "5.2.3.3" -ControlTitle "Ensure password protection is enabled for on-prem Active Directory" `
+                               -ProfileLevel "L1" -Result "Manual" -Details "Password protection settings not found via API. Verify manually." `
+                               -Remediation "Check Entra ID > Security > Authentication methods > Password protection > Enable on Windows Server Active Directory"
+                }
+            }
+            catch {
+                Add-Result -ControlNumber "5.2.3.3" -ControlTitle "Ensure password protection is enabled for on-prem Active Directory" `
+                           -ProfileLevel "L1" -Result "Manual" -Details "Hybrid detected but unable to verify on-prem password protection: $_" `
+                           -Remediation "Verify Azure AD Password Protection is installed and configured for on-premises AD"
+            }
+        }
+    }
+    catch {
+        Add-Result -ControlNumber "5.2.3.3" -ControlTitle "Ensure password protection is enabled for on-prem Active Directory" `
+                   -ProfileLevel "L1" -Result "Manual" -Details "Unable to determine deployment type: $_" `
+                   -Remediation "Install and configure Azure AD Password Protection for on-premises AD"
+    }
 
     # 5.2.3.4 - Ensure all member users are 'MFA capable'
     try {
@@ -2099,7 +2931,7 @@ function Test-EntraID {
         if ($errMsg -match "AuditLog.Read.All|Authentication_MSGraphPermissionMissing|403|Forbidden") {
             Add-Result -ControlNumber "5.2.3.4" -ControlTitle "Ensure all member users are 'MFA capable'" `
                        -ProfileLevel "L1" -Result "Error" -Details "Missing required permission: AuditLog.Read.All. Ensure admin consent is granted for this scope in Entra ID > Enterprise Applications > Microsoft Graph > Permissions." `
-                       -Remediation "Grant admin consent for AuditLog.Read.All scope, then re-authenticate with Connect-CISBenchmark"
+                       -Remediation "Grant admin consent for AuditLog.Read.All scope, then re-authenticate with Connect-CISM365Benchmark"
         }
         else {
             Add-Result -ControlNumber "5.2.3.4" -ControlTitle "Ensure all member users are 'MFA capable'" `
@@ -2136,22 +2968,23 @@ function Test-EntraID {
     # 5.2.3.6 - Ensure system-preferred multifactor authentication is enabled
     try {
         Write-Log "Checking 5.2.3.6 - System-preferred MFA" -Level Info
-        $authMethodsPolicy = Get-MgPolicyAuthenticationMethodPolicy -ErrorAction Stop
+        # Use direct beta API call to get systemCredentialPreferences (SDK may not deserialize it)
+        $authMethodsPolicy = Invoke-MgGraphRequest -Method GET `
+            -Uri "https://graph.microsoft.com/beta/policies/authenticationMethodsPolicy" -ErrorAction Stop
 
-        # System credential preferences - use hashtable key access for Graph API beta properties
-        $systemCredPrefs = $authMethodsPolicy.AdditionalProperties['systemCredentialPreferences']
+        $systemCredPrefs = $authMethodsPolicy.systemCredentialPreferences
 
         # Check if system-preferred MFA is enabled
-        if ($systemCredPrefs -and $systemCredPrefs['state'] -eq "enabled") {
+        if ($systemCredPrefs -and $systemCredPrefs.state -eq "enabled") {
             Add-Result -ControlNumber "5.2.3.6" -ControlTitle "Ensure system-preferred multifactor authentication is enabled" `
                        -ProfileLevel "L1" -Result "Pass" -Details "System-preferred MFA is enabled"
         }
-        elseif ($systemCredPrefs -and $systemCredPrefs['state'] -eq "disabled") {
+        elseif ($systemCredPrefs -and $systemCredPrefs.state -eq "disabled") {
             Add-Result -ControlNumber "5.2.3.6" -ControlTitle "Ensure system-preferred multifactor authentication is enabled" `
                        -ProfileLevel "L1" -Result "Fail" -Details "System-preferred MFA is disabled" `
                        -Remediation "Enable system-preferred MFA in Entra ID > Security > Authentication methods > Settings"
         }
-        elseif ($systemCredPrefs -and $systemCredPrefs['state'] -eq "default") {
+        elseif ($systemCredPrefs -and $systemCredPrefs.state -eq "default") {
             Add-Result -ControlNumber "5.2.3.6" -ControlTitle "Ensure system-preferred multifactor authentication is enabled" `
                        -ProfileLevel "L1" -Result "Fail" -Details "System-preferred MFA is set to default (not explicitly enabled)" `
                        -Remediation "Enable system-preferred MFA in Entra ID > Security > Authentication methods > Settings"
@@ -2169,10 +3002,24 @@ function Test-EntraID {
     }
 
     # 5.2.3.7 - Ensure the email OTP authentication method is disabled (NEW in v6.0.0)
-    Write-Log "Checking 5.2.3.7 - Email OTP authentication method" -Level Info
-    Add-Result -ControlNumber "5.2.3.7" -ControlTitle "Ensure the email OTP authentication method is disabled" `
-               -ProfileLevel "L2" -Result "Manual" -Details "Manual verification required. Check Entra ID > Protection > Authentication methods > Policies > Email OTP" `
-               -Remediation "Navigate to Entra ID > Protection > Authentication methods > Policies and disable the Email OTP method"
+    try {
+        Write-Log "Checking 5.2.3.7 - Email OTP authentication method" -Level Info
+        $emailOtpConfig = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/policies/authenticationMethodsPolicy/authenticationMethodConfigurations/email" -ErrorAction Stop
+        if ($emailOtpConfig.state -eq "disabled") {
+            Add-Result -ControlNumber "5.2.3.7" -ControlTitle "Ensure the email OTP authentication method is disabled" `
+                       -ProfileLevel "L2" -Result "Pass" -Details "Email OTP authentication method is disabled"
+        }
+        else {
+            Add-Result -ControlNumber "5.2.3.7" -ControlTitle "Ensure the email OTP authentication method is disabled" `
+                       -ProfileLevel "L2" -Result "Fail" -Details "Email OTP authentication method is '$($emailOtpConfig.state)'" `
+                       -Remediation "Disable email OTP: Entra ID > Protection > Authentication methods > Policies > Email OTP > Disable"
+        }
+    }
+    catch {
+        Add-Result -ControlNumber "5.2.3.7" -ControlTitle "Ensure the email OTP authentication method is disabled" `
+                   -ProfileLevel "L2" -Result "Manual" -Details "Unable to check email OTP status: $_" `
+                   -Remediation "Navigate to Entra ID > Protection > Authentication methods > Policies and disable the Email OTP method"
+    }
 
     # Password Reset
 
@@ -2416,8 +3263,7 @@ function Test-ExchangeOnline {
         # Note: AuditBypassEnabled property may not be available in all Exchange Online versions
         # Using Get-Mailbox instead of Get-EXOMailbox for better compatibility
         try {
-            $bypassMailboxes = Get-Mailbox -ResultSize Unlimited |
-                               Get-MailboxAuditBypassAssociation |
+            $bypassMailboxes = Get-MailboxAuditBypassAssociation -ResultSize Unlimited |
                                Where-Object { $_.AuditBypassEnabled -eq $true }
 
             if ($null -eq $bypassMailboxes -or @($bypassMailboxes).Count -eq 0) {
@@ -2630,10 +3476,33 @@ function Test-ExchangeOnline {
                    -ProfileLevel "L1" -Result "Error" -Details "Error: $_"
     }
     # 6.5.5 - Ensure Direct Send submissions are rejected (NEW in v6.0.0)
-    Write-Log "Checking 6.5.5 - Direct Send submissions rejected" -Level Info
-    Add-Result -ControlNumber "6.5.5" -ControlTitle "Ensure Direct Send submissions are rejected" `
-               -ProfileLevel "L2" -Result "Manual" -Details "Manual verification required. Verify that Direct Send submissions are configured to be rejected in Exchange Online transport rules" `
-               -Remediation "Configure Exchange Online transport rules to reject Direct Send submissions"
+    try {
+        Write-Log "Checking 6.5.5 - Direct Send submissions rejected" -Level Info
+        if ($null -eq $cachedOrgConfig) { throw "OrganizationConfig data unavailable" }
+        # RejectDirectSend property was added in 2025 Exchange module updates
+        $rejectDirectSendProp = $cachedOrgConfig | Get-Member -Name "RejectDirectSend" -ErrorAction SilentlyContinue
+        if ($rejectDirectSendProp) {
+            if ($cachedOrgConfig.RejectDirectSend -eq $true) {
+                Add-Result -ControlNumber "6.5.5" -ControlTitle "Ensure Direct Send submissions are rejected" `
+                           -ProfileLevel "L2" -Result "Pass" -Details "Direct Send submissions are rejected"
+            }
+            else {
+                Add-Result -ControlNumber "6.5.5" -ControlTitle "Ensure Direct Send submissions are rejected" `
+                           -ProfileLevel "L2" -Result "Fail" -Details "Direct Send submissions are not rejected" `
+                           -Remediation "Set-OrganizationConfig -RejectDirectSend `$true"
+            }
+        }
+        else {
+            Add-Result -ControlNumber "6.5.5" -ControlTitle "Ensure Direct Send submissions are rejected" `
+                       -ProfileLevel "L2" -Result "Manual" -Details "RejectDirectSend property not available (requires latest EXO module). Verify manually." `
+                       -Remediation "Update ExchangeOnlineManagement module and run: Set-OrganizationConfig -RejectDirectSend `$true"
+        }
+    }
+    catch {
+        Add-Result -ControlNumber "6.5.5" -ControlTitle "Ensure Direct Send submissions are rejected" `
+                   -ProfileLevel "L2" -Result "Manual" -Details "Unable to check: $_" `
+                   -Remediation "Configure Exchange Online to reject Direct Send submissions"
+    }
 }
 
 #endregion
@@ -2811,9 +3680,26 @@ function Test-SharePointOnline {
     }
 
     # 7.2.8 - Ensure external sharing is restricted by security group
-    Add-Result -ControlNumber "7.2.8" -ControlTitle "Ensure external sharing is restricted by security group" `
-               -ProfileLevel "L2" -Result "Manual" -Details "Verify external sharing is limited to specific security groups" `
-               -Remediation "Configure security group restrictions for external sharing"
+    try {
+        Write-Log "Checking 7.2.8 - External sharing restricted by security group" -Level Info
+        if ($null -eq $cachedSPOTenant) { throw "SPO Tenant data unavailable" }
+        $spoTenant = $cachedSPOTenant
+
+        $allowList = $spoTenant.GuestSharingGroupAllowListInTenantByPrincipalIdentity
+        if ($allowList -and $allowList.Trim() -ne "") {
+            Add-Result -ControlNumber "7.2.8" -ControlTitle "Ensure external sharing is restricted by security group" `
+                       -ProfileLevel "L2" -Result "Pass" -Details "External sharing restricted to security group(s): $allowList"
+        }
+        else {
+            Add-Result -ControlNumber "7.2.8" -ControlTitle "Ensure external sharing is restricted by security group" `
+                       -ProfileLevel "L2" -Result "Fail" -Details "External sharing is not restricted to any security group - all users can share externally" `
+                       -Remediation "In SharePoint Admin Center > Policies > Sharing > Advanced settings, enable 'Allow only users in specific security groups to share externally' and select a security group"
+        }
+    }
+    catch {
+        Add-Result -ControlNumber "7.2.8" -ControlTitle "Ensure external sharing is restricted by security group" `
+                   -ProfileLevel "L2" -Result "Error" -Details "Error: $_"
+    }
 
     # 7.2.9 - Ensure guest access to a site or OneDrive will expire automatically
     try {
@@ -2902,17 +3788,16 @@ function Test-SharePointOnline {
     # 7.3.2 - Ensure OneDrive sync is restricted for unmanaged devices
     try {
         Write-Log "Checking 7.3.2 - OneDrive sync restriction" -Level Info
-        if ($null -eq $cachedSPOTenant) { throw "SPO Tenant data unavailable" }
-        $spoTenant = $cachedSPOTenant
+        $syncRestriction = Get-SPOTenantSyncClientRestriction -ErrorAction Stop
 
-        if ($spoTenant.IsUnmanagedSyncClientForTenantRestricted -eq $true) {
+        if ($syncRestriction.TenantRestrictionEnabled -eq $true) {
             Add-Result -ControlNumber "7.3.2" -ControlTitle "Ensure OneDrive sync is restricted for unmanaged devices" `
-                       -ProfileLevel "L2" -Result "Pass" -Details "OneDrive sync restricted for unmanaged devices"
+                       -ProfileLevel "L2" -Result "Pass" -Details "OneDrive sync restricted for unmanaged devices (TenantRestrictionEnabled: True)"
         }
         else {
             Add-Result -ControlNumber "7.3.2" -ControlTitle "Ensure OneDrive sync is restricted for unmanaged devices" `
-                       -ProfileLevel "L2" -Result "Fail" -Details "Unmanaged device sync not restricted" `
-                       -Remediation "Set-SPOTenant -IsUnmanagedSyncClientForTenantRestricted `$true"
+                       -ProfileLevel "L2" -Result "Fail" -Details "Unmanaged device sync not restricted (TenantRestrictionEnabled: $($syncRestriction.TenantRestrictionEnabled))" `
+                       -Remediation "Set-SPOTenantSyncClientRestriction -Enable -DomainGuids <your-AAD-domain-GUID>"
         }
     }
     catch {
@@ -2933,23 +3818,21 @@ function Test-MicrosoftTeams {
     # Pre-fetch shared data for this section
     $cachedTeamsMeetingPolicy = $null
     $cachedTenantFedConfig = $null
+    $cachedTeamsClientConfig = $null
 
     # Ensure MicrosoftTeams ConfigAPI submodules are fully loaded
     # The nested Microsoft.Teams.ConfigAPI.Cmdlets module may not auto-load in all contexts
     Import-Module MicrosoftTeams -Force -ErrorAction SilentlyContinue
 
     try { $cachedTeamsMeetingPolicy = Get-CsTeamsMeetingPolicy -Identity Global -ErrorAction Stop } catch { Write-Log "Warning: Could not retrieve Teams meeting policy: $_" -Level Warning }
-    try {
-        $cachedTenantFedConfig = Get-CsTenantFederationConfiguration -ErrorAction Stop
-    }
-    catch {
-        Write-Log "Warning: Could not retrieve tenant federation configuration: $_" -Level Warning
-    }
+    try { $cachedTenantFedConfig = Get-CsTenantFederationConfiguration -ErrorAction Stop } catch { Write-Log "Warning: Could not retrieve tenant federation configuration: $_" -Level Warning }
+    try { $cachedTeamsClientConfig = Get-CsTeamsClientConfiguration -Identity Global -ErrorAction Stop } catch { Write-Log "Warning: Could not retrieve Teams client configuration: $_" -Level Warning }
 
     # 8.1.1 - Ensure external file sharing in Teams is enabled for only approved cloud storage services
     try {
         Write-Log "Checking 8.1.1 - Teams external file sharing" -Level Info
-        $teamsClientConfig = Get-CsTeamsClientConfiguration -Identity Global -ErrorAction Stop
+        if ($null -eq $cachedTeamsClientConfig) { throw "Teams client configuration data unavailable" }
+        $teamsClientConfig = $cachedTeamsClientConfig
 
         $approvedOnly = $true
         if ($teamsClientConfig.AllowDropbox -eq $true -or
@@ -2978,7 +3861,8 @@ function Test-MicrosoftTeams {
     # 8.1.2 - Ensure users can't send emails to a channel email address
     try {
         Write-Log "Checking 8.1.2 - Channel email disabled" -Level Info
-        $teamsClientConfig = Get-CsTeamsClientConfiguration -Identity Global -ErrorAction Stop
+        if ($null -eq $cachedTeamsClientConfig) { throw "Teams client configuration data unavailable" }
+        $teamsClientConfig = $cachedTeamsClientConfig
 
         if ($teamsClientConfig.AllowEmailIntoChannel -eq $false) {
             Add-Result -ControlNumber "8.1.2" -ControlTitle "Ensure users can't send emails to a channel email address" `
@@ -3095,13 +3979,14 @@ function Test-MicrosoftTeams {
         if ($null -eq $cachedTenantFedConfig) { throw "Tenant federation configuration data unavailable" }
         $tenantFedConfig = $cachedTenantFedConfig
 
-        if ($tenantFedConfig.AllowPublicUsers -eq $false) {
+        # AllowPublicUsers can be $true, $false, or $null (empty = not configured = disabled)
+        if ($tenantFedConfig.AllowPublicUsers -ne $true) {
             Add-Result -ControlNumber "8.2.4" -ControlTitle "Ensure communication with Skype users is disabled" `
-                       -ProfileLevel "L1" -Result "Pass" -Details "Skype federation disabled"
+                       -ProfileLevel "L1" -Result "Pass" -Details "Skype federation disabled (AllowPublicUsers: $($tenantFedConfig.AllowPublicUsers))"
         }
         else {
             Add-Result -ControlNumber "8.2.4" -ControlTitle "Ensure communication with Skype users is disabled" `
-                       -ProfileLevel "L1" -Result "Fail" -Details "Skype federation enabled" `
+                       -ProfileLevel "L1" -Result "Fail" -Details "Skype federation enabled (AllowPublicUsers: True)" `
                        -Remediation "Set-CsTenantFederationConfiguration -AllowPublicUsers `$false"
         }
     }
@@ -3119,19 +4004,19 @@ function Test-MicrosoftTeams {
         $globalPolicy = $appPermissionPolicies | Where-Object { $_.Identity -eq "Global" }
 
         if ($globalPolicy) {
-            # Check if third-party and custom apps are restricted
-            $thirdPartyRestricted = ($globalPolicy.DefaultCatalogAppsType -eq "BlockedAppList" -or
-                                      $globalPolicy.DefaultCatalogAppsType -eq "AllowedAppList")
-            $customAppsRestricted = ($globalPolicy.GlobalCatalogAppsType -eq "BlockedAppList" -or
-                                     $globalPolicy.GlobalCatalogAppsType -eq "AllowedAppList")
+            # GlobalCatalogAppsType = third-party apps, PrivateCatalogAppsType = custom/org apps
+            $thirdPartyRestricted = ($globalPolicy.GlobalCatalogAppsType -eq "BlockedAppList" -or
+                                      $globalPolicy.GlobalCatalogAppsType -eq "AllowedAppList")
+            $customAppsRestricted = ($globalPolicy.PrivateCatalogAppsType -eq "BlockedAppList" -or
+                                     $globalPolicy.PrivateCatalogAppsType -eq "AllowedAppList")
 
             if ($thirdPartyRestricted -or $customAppsRestricted) {
                 Add-Result -ControlNumber "8.4.1" -ControlTitle "Ensure app permission policies are configured" `
-                           -ProfileLevel "L1" -Result "Pass" -Details "App permissions restricted (Third-party: $($globalPolicy.DefaultCatalogAppsType), Custom: $($globalPolicy.GlobalCatalogAppsType))"
+                           -ProfileLevel "L1" -Result "Pass" -Details "App permissions restricted (Third-party: $($globalPolicy.GlobalCatalogAppsType), Custom: $($globalPolicy.PrivateCatalogAppsType))"
             }
             else {
                 Add-Result -ControlNumber "8.4.1" -ControlTitle "Ensure app permission policies are configured" `
-                           -ProfileLevel "L1" -Result "Fail" -Details "App permissions too permissive (Third-party: $($globalPolicy.DefaultCatalogAppsType), Custom: $($globalPolicy.GlobalCatalogAppsType))" `
+                           -ProfileLevel "L1" -Result "Fail" -Details "App permissions too permissive (Third-party: $($globalPolicy.GlobalCatalogAppsType), Custom: $($globalPolicy.PrivateCatalogAppsType))" `
                            -Remediation "Configure app permission policies to restrict third-party and custom apps using allowlist or blocklist"
             }
         }
@@ -3364,62 +4249,376 @@ function Test-MicrosoftTeams {
 function Test-PowerBI {
     Write-Log "Checking Section 9: Microsoft Fabric (Power BI)..." -Level Info
 
-    # All Power BI checks are manual as they require portal access
+    # Helper function to find a Fabric tenant setting by settingName (primary) or title (fallback)
+    function Get-FabricSetting {
+        param([string]$SettingName, [array]$Settings, [string]$Title)
+        $result = $Settings | Where-Object { $_.settingName -eq $SettingName } | Select-Object -First 1
+        if ($null -eq $result -and $Title) {
+            $result = $Settings | Where-Object { $_.title -eq $Title } | Select-Object -First 1
+        }
+        return $result
+    }
 
-    Add-Result -ControlNumber "9.1.1" -ControlTitle "Ensure guest user access is restricted" `
-               -ProfileLevel "L1" -Result "Manual" -Details "Check Power BI Admin Portal > Tenant settings" `
-               -Remediation "Disable or restrict guest user access to Power BI"
+    # Try to fetch Fabric tenant settings via direct REST API call
+    $fabricSettings = $null
+    if ($Script:PowerBIConnected -and $Script:PowerBIAccessToken) {
+        try {
+            $pbiHeaders = @{
+                "Authorization" = "Bearer $($Script:PowerBIAccessToken)"
+                "Content-Type"  = "application/json"
+            }
+            $response = Invoke-RestMethod -Uri "https://api.fabric.microsoft.com/v1/admin/tenantsettings" `
+                -Method Get -Headers $pbiHeaders -ErrorAction Stop
+            $fabricSettings = @($response.tenantSettings)
+            Write-Log "Retrieved $($fabricSettings.Count) Fabric tenant settings" -Level Info
+            # Log all setting names for diagnostic purposes
+            $allSettingNames = ($fabricSettings | ForEach-Object { $_.settingName }) -join ", "
+            Write-Log "Available settings: $allSettingNames" -Level Info
+        }
+        catch {
+            $errMsg = $_.Exception.Message
+            if ($_ -match "403" -or $_ -match "Forbidden" -or $_ -match "Unauthorized") {
+                Write-Log "Warning: Fabric admin API returned 403. Your account needs the Fabric Administrator role." -Level Warning
+            }
+            else {
+                Write-Log "Warning: Could not retrieve Fabric tenant settings: $errMsg" -Level Warning
+            }
+            $fabricSettings = $null
+        }
+    }
 
-    Add-Result -ControlNumber "9.1.2" -ControlTitle "Ensure external user invitations are restricted" `
-               -ProfileLevel "L1" -Result "Manual" -Details "Check Power BI Admin Portal > Tenant settings" `
-               -Remediation "Restrict ability to invite external users"
+    if ($null -eq $fabricSettings -or $fabricSettings.Count -eq 0) {
+        # Fall back to manual for all Power BI controls
+        Write-Log "Power BI API not available - all Section 9 controls will be Manual" -Level Warning
+        $pbiDetail = if ($Script:PowerBIConnected) {
+            "Power BI connected but admin API returned no data. Ensure your account has the Fabric Administrator role."
+        } else {
+            "Power BI not connected. Install MicrosoftPowerBIMgmt.Profile and re-run."
+        }
 
-    Add-Result -ControlNumber "9.1.3" -ControlTitle "Ensure guest access to content is restricted" `
-               -ProfileLevel "L1" -Result "Manual" -Details "Check Power BI Admin Portal > Tenant settings" `
-               -Remediation "Restrict guest browsing of Fabric content"
+        $pbiControls = @(
+            @{ Num = "9.1.1"; Title = "Ensure guest user access is restricted"; Level = "L1"; Sub = "Tenant settings" }
+            @{ Num = "9.1.2"; Title = "Ensure external user invitations are restricted"; Level = "L1"; Sub = "Tenant settings" }
+            @{ Num = "9.1.3"; Title = "Ensure guest access to content is restricted"; Level = "L1"; Sub = "Tenant settings" }
+            @{ Num = "9.1.4"; Title = "Ensure 'Publish to web' is restricted"; Level = "L1"; Sub = "Tenant settings > Export and sharing" }
+            @{ Num = "9.1.5"; Title = "Ensure 'Interact with and share R and Python' visuals is 'Disabled'"; Level = "L2"; Sub = "Tenant settings" }
+            @{ Num = "9.1.6"; Title = "Ensure 'Allow users to apply sensitivity labels for content' is 'Enabled'"; Level = "L1"; Sub = "Tenant settings > Information protection" }
+            @{ Num = "9.1.7"; Title = "Ensure shareable links are restricted"; Level = "L1"; Sub = "Tenant settings" }
+            @{ Num = "9.1.8"; Title = "Ensure enabling of external data sharing is restricted"; Level = "L1"; Sub = "Tenant settings" }
+            @{ Num = "9.1.9"; Title = "Ensure 'Block ResourceKey Authentication' is 'Enabled'"; Level = "L1"; Sub = "Tenant settings" }
+            @{ Num = "9.1.10"; Title = "Ensure access to APIs by Service Principals is restricted"; Level = "L1"; Sub = "Tenant settings > Developer" }
+            @{ Num = "9.1.11"; Title = "Ensure Service Principals cannot create and use profiles"; Level = "L1"; Sub = "Tenant settings" }
+            @{ Num = "9.1.12"; Title = "Ensure service principals ability to create workspaces, connections and deployment pipelines is restricted"; Level = "L1"; Sub = "Tenant settings" }
+        )
+        foreach ($ctrl in $pbiControls) {
+            Add-Result -ControlNumber $ctrl.Num -ControlTitle $ctrl.Title `
+                       -ProfileLevel $ctrl.Level -Result "Manual" -Details "$pbiDetail Check Power BI Admin Portal > $($ctrl.Sub)" `
+                       -Remediation "Assign Fabric Administrator role to your account, or check Power BI Admin Portal manually"
+        }
+        return
+    }
 
-    Add-Result -ControlNumber "9.1.4" -ControlTitle "Ensure 'Publish to web' is restricted" `
-               -ProfileLevel "L1" -Result "Manual" -Details "Check Power BI Admin Portal > Tenant settings > Export and sharing" `
-               -Remediation "Disable or restrict 'Publish to web' feature"
+    # Power BI API is available - automate all controls
 
-    Add-Result -ControlNumber "9.1.5" -ControlTitle "Ensure 'Interact with and share R and Python' visuals is 'Disabled'" `
-               -ProfileLevel "L2" -Result "Manual" -Details "Check Power BI Admin Portal > Tenant settings" `
-               -Remediation "Disable R and Python script visuals"
+    # 9.1.1 - Ensure guest user access is restricted
+    try {
+        Write-Log "Checking 9.1.1 - Guest user access restricted" -Level Info
+        $setting = Get-FabricSetting -SettingName "AllowGuestUserToAccessSharedContent" -Settings $fabricSettings -Title "Guest users can access Microsoft Fabric"
+        if ($null -eq $setting) {
+            Add-Result -ControlNumber "9.1.1" -ControlTitle "Ensure guest user access is restricted" `
+                       -ProfileLevel "L1" -Result "Pass" -Details "Guest user access setting not found (disabled by default)"
+        }
+        elseif ($setting.enabled -eq $false) {
+            Add-Result -ControlNumber "9.1.1" -ControlTitle "Ensure guest user access is restricted" `
+                       -ProfileLevel "L1" -Result "Pass" -Details "Guest user access to shared content is disabled"
+        }
+        else {
+            Add-Result -ControlNumber "9.1.1" -ControlTitle "Ensure guest user access is restricted" `
+                       -ProfileLevel "L1" -Result "Fail" -Details "Guest user access to shared content is enabled" `
+                       -Remediation "Disable 'Allow guest users to access Microsoft Fabric' in Power BI Admin Portal > Tenant settings"
+        }
+    }
+    catch {
+        Add-Result -ControlNumber "9.1.1" -ControlTitle "Ensure guest user access is restricted" `
+                   -ProfileLevel "L1" -Result "Manual" -Details "Unable to check: $_" `
+                   -Remediation "Check Power BI Admin Portal > Tenant settings > Guest user access"
+    }
 
-    Add-Result -ControlNumber "9.1.6" -ControlTitle "Ensure 'Allow users to apply sensitivity labels for content' is 'Enabled'" `
-               -ProfileLevel "L1" -Result "Manual" -Details "Check Power BI Admin Portal > Tenant settings > Information protection" `
-               -Remediation "Enable sensitivity labels in Power BI (requires MIP prerequisites)"
+    # 9.1.2 - Ensure external user invitations are restricted
+    try {
+        Write-Log "Checking 9.1.2 - External user invitations restricted" -Level Info
+        $setting = Get-FabricSetting -SettingName "ExternalSharingV2" -Settings $fabricSettings -Title "Users can invite guest users to collaborate through item sharing and permissions"
+        if ($null -eq $setting) {
+            Add-Result -ControlNumber "9.1.2" -ControlTitle "Ensure external user invitations are restricted" `
+                       -ProfileLevel "L1" -Result "Pass" -Details "External user invitation setting not found (disabled by default)"
+        }
+        elseif ($setting.enabled -eq $false) {
+            Add-Result -ControlNumber "9.1.2" -ControlTitle "Ensure external user invitations are restricted" `
+                       -ProfileLevel "L1" -Result "Pass" -Details "External user invitations are restricted"
+        }
+        else {
+            Add-Result -ControlNumber "9.1.2" -ControlTitle "Ensure external user invitations are restricted" `
+                       -ProfileLevel "L1" -Result "Fail" -Details "External user invitations are allowed" `
+                       -Remediation "Disable 'Invite external users to your organization' in Power BI Admin Portal > Tenant settings"
+        }
+    }
+    catch {
+        Add-Result -ControlNumber "9.1.2" -ControlTitle "Ensure external user invitations are restricted" `
+                   -ProfileLevel "L1" -Result "Manual" -Details "Unable to check: $_" `
+                   -Remediation "Check Power BI Admin Portal > Tenant settings > External user invitations"
+    }
 
-    Add-Result -ControlNumber "9.1.7" -ControlTitle "Ensure shareable links are restricted" `
-               -ProfileLevel "L1" -Result "Manual" -Details "Check Power BI Admin Portal > Tenant settings" `
-               -Remediation "Restrict 'People in organization' shareable links"
+    # 9.1.3 - Ensure guest access to content is restricted
+    try {
+        Write-Log "Checking 9.1.3 - Guest access to content restricted" -Level Info
+        $setting = Get-FabricSetting -SettingName "ElevatedGuestsTenant" -Settings $fabricSettings -Title "Guest users can browse and access Fabric content"
+        if ($null -eq $setting) {
+            Add-Result -ControlNumber "9.1.3" -ControlTitle "Ensure guest access to content is restricted" `
+                       -ProfileLevel "L1" -Result "Pass" -Details "Guest content browsing setting not found (disabled by default)"
+        }
+        elseif ($setting.enabled -eq $false) {
+            Add-Result -ControlNumber "9.1.3" -ControlTitle "Ensure guest access to content is restricted" `
+                       -ProfileLevel "L1" -Result "Pass" -Details "Guest access to browse content is disabled"
+        }
+        else {
+            Add-Result -ControlNumber "9.1.3" -ControlTitle "Ensure guest access to content is restricted" `
+                       -ProfileLevel "L1" -Result "Fail" -Details "Guest users can browse Fabric content" `
+                       -Remediation "Disable 'Show Microsoft Entra guests in lists of suggested people' in Power BI Admin Portal > Tenant settings"
+        }
+    }
+    catch {
+        Add-Result -ControlNumber "9.1.3" -ControlTitle "Ensure guest access to content is restricted" `
+                   -ProfileLevel "L1" -Result "Manual" -Details "Unable to check: $_" `
+                   -Remediation "Check Power BI Admin Portal > Tenant settings > Guest content browsing"
+    }
 
-    Add-Result -ControlNumber "9.1.8" -ControlTitle "Ensure enabling of external data sharing is restricted" `
-               -ProfileLevel "L1" -Result "Manual" -Details "Check Power BI Admin Portal > Tenant settings" `
-               -Remediation "Restrict external dataset sharing"
+    # 9.1.4 - Ensure 'Publish to web' is restricted
+    try {
+        Write-Log "Checking 9.1.4 - Publish to web restricted" -Level Info
+        $setting = Get-FabricSetting -SettingName "PublishToWeb" -Settings $fabricSettings -Title "Publish to web"
+        if ($null -eq $setting) {
+            Add-Result -ControlNumber "9.1.4" -ControlTitle "Ensure 'Publish to web' is restricted" `
+                       -ProfileLevel "L1" -Result "Pass" -Details "Publish to web setting not found (disabled by default)"
+        }
+        elseif ($setting.enabled -eq $false) {
+            Add-Result -ControlNumber "9.1.4" -ControlTitle "Ensure 'Publish to web' is restricted" `
+                       -ProfileLevel "L1" -Result "Pass" -Details "Publish to web is disabled"
+        }
+        elseif ($setting.enabled -eq $true -and $setting.enabledSecurityGroups -and $setting.enabledSecurityGroups.Count -gt 0) {
+            $groups = ($setting.enabledSecurityGroups | ForEach-Object { $_.name }) -join ", "
+            Add-Result -ControlNumber "9.1.4" -ControlTitle "Ensure 'Publish to web' is restricted" `
+                       -ProfileLevel "L1" -Result "Pass" -Details "Publish to web restricted to security groups: $groups"
+        }
+        else {
+            Add-Result -ControlNumber "9.1.4" -ControlTitle "Ensure 'Publish to web' is restricted" `
+                       -ProfileLevel "L1" -Result "Fail" -Details "Publish to web is enabled for the entire organization" `
+                       -Remediation "Disable or restrict 'Publish to web' in Power BI Admin Portal > Tenant settings > Export and sharing"
+        }
+    }
+    catch {
+        Add-Result -ControlNumber "9.1.4" -ControlTitle "Ensure 'Publish to web' is restricted" `
+                   -ProfileLevel "L1" -Result "Manual" -Details "Unable to check: $_" `
+                   -Remediation "Check Power BI Admin Portal > Tenant settings > Publish to web"
+    }
 
-    Add-Result -ControlNumber "9.1.9" -ControlTitle "Ensure 'Block ResourceKey Authentication' is 'Enabled'" `
-               -ProfileLevel "L1" -Result "Manual" -Details "Check Power BI Admin Portal > Tenant settings" `
-               -Remediation "Enable blocking of resource key authentication"
+    # 9.1.5 - Ensure 'Interact with and share R and Python' visuals is 'Disabled'
+    try {
+        Write-Log "Checking 9.1.5 - R and Python visuals disabled" -Level Info
+        $setting = Get-FabricSetting -SettingName "RScriptVisual" -Settings $fabricSettings -Title "Interact with and share R and Python visuals"
+        if ($null -eq $setting) {
+            Add-Result -ControlNumber "9.1.5" -ControlTitle "Ensure 'Interact with and share R and Python' visuals is 'Disabled'" `
+                       -ProfileLevel "L2" -Result "Pass" -Details "R and Python visual setting not found (disabled by default)"
+        }
+        elseif ($setting.enabled -eq $false) {
+            Add-Result -ControlNumber "9.1.5" -ControlTitle "Ensure 'Interact with and share R and Python' visuals is 'Disabled'" `
+                       -ProfileLevel "L2" -Result "Pass" -Details "R and Python visuals are disabled"
+        }
+        else {
+            Add-Result -ControlNumber "9.1.5" -ControlTitle "Ensure 'Interact with and share R and Python' visuals is 'Disabled'" `
+                       -ProfileLevel "L2" -Result "Fail" -Details "R and Python visuals are enabled" `
+                       -Remediation "Disable 'Interact with and share R and Python visuals' in Power BI Admin Portal > Tenant settings > R and Python visuals"
+        }
+    }
+    catch {
+        Add-Result -ControlNumber "9.1.5" -ControlTitle "Ensure 'Interact with and share R and Python' visuals is 'Disabled'" `
+                   -ProfileLevel "L2" -Result "Manual" -Details "Unable to check: $_" `
+                   -Remediation "Check Power BI Admin Portal > Tenant settings > R and Python visuals"
+    }
 
-    Add-Result -ControlNumber "9.1.10" -ControlTitle "Ensure access to APIs by Service Principals is restricted" `
-               -ProfileLevel "L1" -Result "Manual" -Details "Check Power BI Admin Portal > Tenant settings > Developer" `
-               -Remediation "Restrict service principal API access"
+    # 9.1.6 - Ensure 'Allow users to apply sensitivity labels for content' is 'Enabled'
+    try {
+        Write-Log "Checking 9.1.6 - Sensitivity labels enabled" -Level Info
+        $setting = Get-FabricSetting -SettingName "EimInformationProtectionEdit" -Settings $fabricSettings -Title "Allow users to apply sensitivity labels for content"
+        if ($null -ne $setting -and $setting.enabled -eq $true) {
+            Add-Result -ControlNumber "9.1.6" -ControlTitle "Ensure 'Allow users to apply sensitivity labels for content' is 'Enabled'" `
+                       -ProfileLevel "L1" -Result "Pass" -Details "Sensitivity labels for Power BI content are enabled"
+        }
+        else {
+            Add-Result -ControlNumber "9.1.6" -ControlTitle "Ensure 'Allow users to apply sensitivity labels for content' is 'Enabled'" `
+                       -ProfileLevel "L1" -Result "Fail" -Details "Sensitivity labels for Power BI content are not enabled" `
+                       -Remediation "Enable 'Allow users to apply sensitivity labels for content' in Power BI Admin Portal > Tenant settings > Information protection"
+        }
+    }
+    catch {
+        Add-Result -ControlNumber "9.1.6" -ControlTitle "Ensure 'Allow users to apply sensitivity labels for content' is 'Enabled'" `
+                   -ProfileLevel "L1" -Result "Manual" -Details "Unable to check: $_" `
+                   -Remediation "Check Power BI Admin Portal > Tenant settings > Information protection > Sensitivity labels"
+    }
 
-    Add-Result -ControlNumber "9.1.11" -ControlTitle "Ensure Service Principals cannot create and use profiles" `
-               -ProfileLevel "L1" -Result "Manual" -Details "Check Power BI Admin Portal > Tenant settings" `
-               -Remediation "Restrict service principal profile creation"
+    # 9.1.7 - Ensure shareable links are restricted
+    try {
+        Write-Log "Checking 9.1.7 - Shareable links restricted" -Level Info
+        $setting = Get-FabricSetting -SettingName "ShareLinkToEntireOrg" -Settings $fabricSettings -Title "Allow shareable links to grant access to everyone in your organization"
+        if ($null -eq $setting) {
+            Add-Result -ControlNumber "9.1.7" -ControlTitle "Ensure shareable links are restricted" `
+                       -ProfileLevel "L1" -Result "Pass" -Details "Shareable links to entire organization setting not found (disabled by default)"
+        }
+        elseif ($setting.enabled -eq $false) {
+            Add-Result -ControlNumber "9.1.7" -ControlTitle "Ensure shareable links are restricted" `
+                       -ProfileLevel "L1" -Result "Pass" -Details "Shareable links to entire organization are disabled"
+        }
+        else {
+            Add-Result -ControlNumber "9.1.7" -ControlTitle "Ensure shareable links are restricted" `
+                       -ProfileLevel "L1" -Result "Fail" -Details "Shareable links can grant access to everyone in the organization" `
+                       -Remediation "Disable 'Allow shareable links to grant access to everyone in your organization' in Power BI Admin Portal > Tenant settings > Export and sharing"
+        }
+    }
+    catch {
+        Add-Result -ControlNumber "9.1.7" -ControlTitle "Ensure shareable links are restricted" `
+                   -ProfileLevel "L1" -Result "Manual" -Details "Unable to check: $_" `
+                   -Remediation "Check Power BI Admin Portal > Tenant settings > Shareable links"
+    }
 
-    # 9.1.12 - Ensure service principals ability to create workspaces, connections and deployment pipelines is restricted (NEW in v6.0.0)
+    # 9.1.8 - Ensure enabling of external data sharing is restricted
+    try {
+        Write-Log "Checking 9.1.8 - External data sharing restricted" -Level Info
+        $setting = Get-FabricSetting -SettingName "AllowExternalDataSharingSwitch" -Settings $fabricSettings -Title "External data sharing"
+        if ($null -eq $setting) {
+            Add-Result -ControlNumber "9.1.8" -ControlTitle "Ensure enabling of external data sharing is restricted" `
+                       -ProfileLevel "L1" -Result "Pass" -Details "External data sharing setting not found (disabled by default)"
+        }
+        elseif ($setting.enabled -eq $false) {
+            Add-Result -ControlNumber "9.1.8" -ControlTitle "Ensure enabling of external data sharing is restricted" `
+                       -ProfileLevel "L1" -Result "Pass" -Details "External data sharing is disabled"
+        }
+        else {
+            Add-Result -ControlNumber "9.1.8" -ControlTitle "Ensure enabling of external data sharing is restricted" `
+                       -ProfileLevel "L1" -Result "Fail" -Details "External data sharing is enabled" `
+                       -Remediation "Disable external data sharing in Power BI Admin Portal > Tenant settings"
+        }
+    }
+    catch {
+        Add-Result -ControlNumber "9.1.8" -ControlTitle "Ensure enabling of external data sharing is restricted" `
+                   -ProfileLevel "L1" -Result "Manual" -Details "Unable to check: $_" `
+                   -Remediation "Check Power BI Admin Portal > Tenant settings > External data sharing"
+    }
+
+    # 9.1.9 - Ensure 'Block ResourceKey Authentication' is 'Enabled'
+    try {
+        Write-Log "Checking 9.1.9 - Block ResourceKey Authentication" -Level Info
+        $setting = Get-FabricSetting -SettingName "BlockResourceKeyAuthentication" -Settings $fabricSettings -Title "Block ResourceKey Authentication"
+        if ($null -ne $setting -and $setting.enabled -eq $true) {
+            Add-Result -ControlNumber "9.1.9" -ControlTitle "Ensure 'Block ResourceKey Authentication' is 'Enabled'" `
+                       -ProfileLevel "L1" -Result "Pass" -Details "ResourceKey authentication is blocked"
+        }
+        elseif ($null -ne $setting -and $setting.enabled -eq $false) {
+            Add-Result -ControlNumber "9.1.9" -ControlTitle "Ensure 'Block ResourceKey Authentication' is 'Enabled'" `
+                       -ProfileLevel "L1" -Result "Fail" -Details "ResourceKey authentication is not blocked" `
+                       -Remediation "Enable 'Block ResourceKey Authentication' in Power BI Admin Portal > Tenant settings > Developer settings"
+        }
+        else {
+            Add-Result -ControlNumber "9.1.9" -ControlTitle "Ensure 'Block ResourceKey Authentication' is 'Enabled'" `
+                       -ProfileLevel "L1" -Result "Manual" -Details "BlockResourceKey setting not found. Verify manually." `
+                       -Remediation "Check Power BI Admin Portal > Tenant settings > Developer settings > Block ResourceKey Authentication"
+        }
+    }
+    catch {
+        Add-Result -ControlNumber "9.1.9" -ControlTitle "Ensure 'Block ResourceKey Authentication' is 'Enabled'" `
+                   -ProfileLevel "L1" -Result "Manual" -Details "Unable to check: $_" `
+                   -Remediation "Check Power BI Admin Portal > Tenant settings > Block ResourceKey Authentication"
+    }
+
+    # 9.1.10 - Ensure access to APIs by Service Principals is restricted
+    try {
+        Write-Log "Checking 9.1.10 - Service Principal API access restricted" -Level Info
+        $setting = Get-FabricSetting -SettingName "ServicePrincipalAccess" -Settings $fabricSettings -Title "Service principals can call Fabric public APIs"
+        if ($null -eq $setting) {
+            Add-Result -ControlNumber "9.1.10" -ControlTitle "Ensure access to APIs by Service Principals is restricted" `
+                       -ProfileLevel "L1" -Result "Pass" -Details "Service principal API access setting not found (disabled by default)"
+        }
+        elseif ($setting.enabled -eq $false) {
+            Add-Result -ControlNumber "9.1.10" -ControlTitle "Ensure access to APIs by Service Principals is restricted" `
+                       -ProfileLevel "L1" -Result "Pass" -Details "Service principal API access is disabled"
+        }
+        elseif ($setting.enabled -eq $true -and $setting.enabledSecurityGroups -and $setting.enabledSecurityGroups.Count -gt 0) {
+            $groups = ($setting.enabledSecurityGroups | ForEach-Object { $_.name }) -join ", "
+            Add-Result -ControlNumber "9.1.10" -ControlTitle "Ensure access to APIs by Service Principals is restricted" `
+                       -ProfileLevel "L1" -Result "Pass" -Details "Service principal API access restricted to security groups: $groups"
+        }
+        else {
+            Add-Result -ControlNumber "9.1.10" -ControlTitle "Ensure access to APIs by Service Principals is restricted" `
+                       -ProfileLevel "L1" -Result "Fail" -Details "Service principal API access is enabled for the entire organization" `
+                       -Remediation "Restrict service principal API access to specific security groups in Power BI Admin Portal > Tenant settings > Developer settings"
+        }
+    }
+    catch {
+        Add-Result -ControlNumber "9.1.10" -ControlTitle "Ensure access to APIs by Service Principals is restricted" `
+                   -ProfileLevel "L1" -Result "Manual" -Details "Unable to check: $_" `
+                   -Remediation "Check Power BI Admin Portal > Tenant settings > Developer settings > Service principals"
+    }
+
+    # 9.1.11 - Ensure Service Principals cannot create and use profiles
+    try {
+        Write-Log "Checking 9.1.11 - Service Principal profiles restricted" -Level Info
+        $setting = Get-FabricSetting -SettingName "AllowServicePrincipalsCreateAndUseProfiles" -Settings $fabricSettings -Title "Allow service principals to create and use profiles"
+        if ($null -eq $setting) {
+            Add-Result -ControlNumber "9.1.11" -ControlTitle "Ensure Service Principals cannot create and use profiles" `
+                       -ProfileLevel "L1" -Result "Pass" -Details "Service principal profile setting not found (disabled by default)"
+        }
+        elseif ($setting.enabled -eq $false) {
+            Add-Result -ControlNumber "9.1.11" -ControlTitle "Ensure Service Principals cannot create and use profiles" `
+                       -ProfileLevel "L1" -Result "Pass" -Details "Service principal profile creation is disabled"
+        }
+        else {
+            Add-Result -ControlNumber "9.1.11" -ControlTitle "Ensure Service Principals cannot create and use profiles" `
+                       -ProfileLevel "L1" -Result "Fail" -Details "Service principals can create and use profiles" `
+                       -Remediation "Disable 'Allow service principals to create and use profiles' in Power BI Admin Portal > Tenant settings"
+        }
+    }
+    catch {
+        Add-Result -ControlNumber "9.1.11" -ControlTitle "Ensure Service Principals cannot create and use profiles" `
+                   -ProfileLevel "L1" -Result "Manual" -Details "Unable to check: $_" `
+                   -Remediation "Check Power BI Admin Portal > Tenant settings > Service principal profiles"
+    }
+
+    # 9.1.12 - Ensure service principals ability to create workspaces, connections and deployment pipelines is restricted
     try {
         Write-Log "Checking 9.1.12 - Service principal workspace/connection/pipeline restrictions" -Level Info
-        Add-Result -ControlNumber "9.1.12" -ControlTitle "Ensure service principals ability to create workspaces, connections and deployment pipelines is restricted" `
-                   -ProfileLevel "L1" -Result "Manual" -Details "Manual verification required. Check Power BI Admin Portal > Tenant settings > Service principals can create and use workspaces, connections, and deployment pipelines" `
-                   -Remediation "Restrict service principals from creating workspaces, connections, and deployment pipelines in Power BI Admin Portal > Tenant settings"
+        $spSetting = Get-FabricSetting -SettingName "ServicePrincipalCreateWorkspace" -Settings $fabricSettings -Title "Service principals can create workspaces, connections, and deployment pipelines"
+
+        if ($null -eq $spSetting) {
+            Add-Result -ControlNumber "9.1.12" -ControlTitle "Ensure service principals ability to create workspaces, connections and deployment pipelines is restricted" `
+                       -ProfileLevel "L1" -Result "Pass" -Details "Service principal workspace/pipeline setting not found (disabled by default)"
+        }
+        elseif ($spSetting.enabled -eq $false) {
+            Add-Result -ControlNumber "9.1.12" -ControlTitle "Ensure service principals ability to create workspaces, connections and deployment pipelines is restricted" `
+                       -ProfileLevel "L1" -Result "Pass" -Details "Service principal workspace/pipeline creation is disabled"
+        }
+        elseif ($spSetting.enabled -eq $true -and $spSetting.enabledSecurityGroups -and $spSetting.enabledSecurityGroups.Count -gt 0) {
+            $groups = ($spSetting.enabledSecurityGroups | ForEach-Object { $_.name }) -join ", "
+            Add-Result -ControlNumber "9.1.12" -ControlTitle "Ensure service principals ability to create workspaces, connections and deployment pipelines is restricted" `
+                       -ProfileLevel "L1" -Result "Pass" -Details "Service principal workspace/pipeline creation restricted to security groups: $groups"
+        }
+        else {
+            Add-Result -ControlNumber "9.1.12" -ControlTitle "Ensure service principals ability to create workspaces, connections and deployment pipelines is restricted" `
+                       -ProfileLevel "L1" -Result "Fail" -Details "Service principal workspace/pipeline creation is enabled for the entire organization" `
+                       -Remediation "Restrict service principal workspace and pipeline creation to specific security groups in Power BI Admin Portal > Tenant settings"
+        }
     }
     catch {
         Add-Result -ControlNumber "9.1.12" -ControlTitle "Ensure service principals ability to create workspaces, connections and deployment pipelines is restricted" `
-                   -ProfileLevel "L1" -Result "Error" -Details "Error: $_"
+                   -ProfileLevel "L1" -Result "Manual" -Details "Unable to check: $_" `
+                   -Remediation "Check Power BI Admin Portal > Tenant settings > Service principal workspace/pipeline restrictions"
     }
 }
 
@@ -3446,7 +4645,7 @@ function Export-HtmlReport {
     $safeUserAccount = Get-HtmlEncoded $currentUserAccount
     $safeReportDate = Get-HtmlEncoded $reportDate
 
-    $passRate = if ($Script:TotalControls -gt 0) {
+    $passRate = if ($Script:TotalControls -gt 0 -and ($Script:TotalControls - $Script:ManualControls) -gt 0) {
         [math]::Round(($Script:PassedControls / ($Script:TotalControls - $Script:ManualControls)) * 100, 2)
     } else { 0 }
 
@@ -3845,7 +5044,7 @@ function Export-HtmlReport {
         <tbody>
 "@
 
-    foreach ($result in $Script:Results | Sort-Object ControlNumber) {
+    foreach ($result in $Script:Results | Sort-Object { [array]($_.ControlNumber -split '\.' | ForEach-Object { [int]$_ }) }) {
         $statusClass = "status-" + $result.Result.ToLower()
         $resultLower = $result.Result.ToLower()
         $levelValue = $result.ProfileLevel
@@ -3883,17 +5082,8 @@ function Export-HtmlReport {
             <a href="https://github.com/mohammedsiddiqui6872/CIS-Microsoft-365-Foundations-Benchmark" target="_blank" class="action-btn" data-tooltip="View on GitHub">
                 <svg width="28" height="28" viewBox="0 0 24 24" fill="white"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
             </a>
-            <a href="https://github.com/mohammedsiddiqui6872/CIS-Microsoft-365-Foundations-Benchmark/issues" target="_blank" class="action-btn" data-tooltip="Report Issues">
-                <svg width="28" height="28" viewBox="0 0 24 24" fill="white"><path d="M12 2c5.514 0 10 4.486 10 10s-4.486 10-10 10-10-4.486-10-10 4.486-10 10-10zm0-2c-6.627 0-12 5.373-12 12s5.373 12 12 12 12-5.373 12-12-5.373-12-12-12zm-1 6h2v8h-2v-8zm1 12.25c-.69 0-1.25-.56-1.25-1.25s.56-1.25 1.25-1.25 1.25.56 1.25 1.25-.56 1.25-1.25 1.25z"/></svg>
-            </a>
-            <a href="https://github.com/mohammedsiddiqui6872/CIS-Microsoft-365-Foundations-Benchmark/issues/new" target="_blank" class="action-btn" data-tooltip="Submit Feedback">
-                <svg width="28" height="28" viewBox="0 0 24 24" fill="white"><path d="M12 3c5.514 0 10 3.592 10 8.007 0 4.917-5.145 7.961-9.91 7.961-1.937 0-3.383-.397-4.394-.644-1 .613-1.595 1.037-4.272 1.82.535-1.373.723-2.748.602-4.265-.838-1-2.025-2.4-2.025-4.872-.001-4.415 4.485-8.007 9.999-8.007zm0-2c-6.338 0-12 4.226-12 10.007 0 2.05.739 4.063 2.047 5.625.055 1.83-1.023 4.456-1.993 6.368 2.602-.47 6.301-1.508 7.978-2.536 1.418.345 2.775.503 4.059.503 7.084 0 11.91-4.837 11.91-9.961-.001-5.811-5.702-10.006-12.001-10.006z"/></svg>
-            </a>
             <a href="https://www.linkedin.com/in/mohammedsiddiqui6872/" target="_blank" class="action-btn" data-tooltip="Let's Chat!">
                 <svg width="28" height="28" viewBox="0 0 24 24" fill="white"><path d="M19 0h-14c-2.761 0-5 2.239-5 5v14c0 2.761 2.239 5 5 5h14c2.762 0 5-2.239 5-5v-14c0-2.761-2.238-5-5-5zm-11 19h-3v-11h3v11zm-1.5-12.268c-.966 0-1.75-.79-1.75-1.764s.784-1.764 1.75-1.764 1.75.79 1.75 1.764-.783 1.764-1.75 1.764zm13.5 12.268h-3v-5.604c0-3.368-4-3.113-4 0v5.604h-3v-11h3v1.765c1.396-2.586 7-2.777 7 2.476v6.759z"/></svg>
-            </a>
-            <a href="https://buymeacoffee.com/mohammedsiddiqui" target="_blank" class="action-btn" data-tooltip="Buy Me a Coffee">
-                <svg width="28" height="28" viewBox="0 0 24 24" fill="white"><path d="M20 3H4v10c0 2.21 1.79 4 4 4h6c2.21 0 4-1.79 4-4v-3h2c1.11 0 2-.9 2-2V5c0-1.11-.89-2-2-2zm0 5h-2V5h2v3zM4 19h16v2H4z"/></svg>
             </a>
         </div>
 
@@ -4027,7 +5217,7 @@ function Export-CsvReport {
     param([string]$OutputPath)
 
     $csvPath = Join-Path $OutputPath "CIS-M365-Compliance-Report_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
-    $Script:Results | Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8
+    $Script:Results | Sort-Object { [array]($_.ControlNumber -split '\.' | ForEach-Object { [int]$_ }) } | Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8
     Write-Log "CSV report saved to: $csvPath" -Level Success
     return $csvPath
 }
@@ -4048,10 +5238,12 @@ function Start-ComplianceCheck {
     $Script:L1PassedControls = 0
     $Script:L1FailedControls = 0
     $Script:L1ManualControls = 0
+    $Script:L1ErrorControls = 0
     $Script:L2TotalControls = 0
     $Script:L2PassedControls = 0
     $Script:L2FailedControls = 0
     $Script:L2ManualControls = 0
+    $Script:L2ErrorControls = 0
 
     # Initialize file-based audit log
     $logTimestamp = Get-Date -Format "yyyyMMdd_HHmmss"
