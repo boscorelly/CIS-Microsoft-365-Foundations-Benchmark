@@ -223,9 +223,6 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## Acknowledgments
 
-- CIS (Center for Internet Security) for the comprehensive benchmark
-- Microsoft for providing Graph API and PowerShell modules
-- The Microsoft 365 security community
 - Thanks to ITEngineer-0815, M0nk3yOo, ozsaid, boscorelly, and Mateusz Jagiello for their contributions and issue reports
 
 ---
