@@ -10,62 +10,50 @@
 
 A comprehensive PowerShell module that audits your Microsoft 365 environment against **all 140 CIS Microsoft 365 Foundations Benchmark v6.0.0 controls** and generates detailed HTML and CSV compliance reports.
 
-## What's New in v4.1.0
+## What's New in v5.0.0
 
-**v4.1.0 - Connection Reliability & Diagnostics Release (Issues #13, #14)**
-- **Fix: Intune 403 Forbidden errors (Issue #14)** - Added missing `DeviceManagementConfiguration.Read.All` and `DeviceManagementServiceConfig.Read.All` Graph API scopes for checks 4.1, 4.2
-- **Fix: 2.1.11 now reports missing file types (Issue #13)** - Instead of generic "Fail", shows which specific attachment types are missing per malware filter policy
-- **Fix: 5.2.3.4 permission error guidance** - Detects `AuditLog.Read.All` consent issues and provides admin consent remediation steps
-- **Fix: Exchange Online WAM errors** - Uses `-DisableWAM` for reliable authentication across all environments
-- **Fix: SharePoint Online auth loop** - Uses `-ModernAuth` for seamless browser-based authentication
-- **Fix: Teams 8.2.x federation errors** - Force-loads MicrosoftTeams ConfigAPI submodules to prevent "cmdlet not recognized" errors
-
-**v4.0.0 - Major Code Audit & Bug Fix Release**
-- **Critical Fix: XSS vulnerability** - All HTML report output now sanitized via `[System.Net.WebUtility]::HtmlEncode()`
-- **Critical Fix: 6.1.2 false failures (Issue #12)** - Now respects `DefaultAuditSet` so mailboxes using Microsoft's default audit actions correctly pass
-- **Critical Fix: 1.1.1 false positives** - No longer flags read-only roles (Global Reader, Directory Readers, etc.) as administrative accounts
-- **Critical Fix: Intune 4.1 & 4.2** - Now verify actual compliance policy values instead of just checking if objects exist
-- **Critical Fix: Password expiration (1.3.1)** - Now requires exactly `2147483647` (never expire) instead of accepting >365 days
-- **Critical Fix: 6.2.1 outbound spam** - Iterates all policies instead of treating array as single object
-- **Performance: O(n²) array growth eliminated** - Results collection uses `List<T>` instead of `+=`
-- **File-based audit logging** - Every check result now logged to timestamped `.log` file alongside reports
-- **Null safety** - Fixed null reference on missing Graph scopes, null check order, `.Count` on single objects (PS 5.1)
-- **Security hardened** - Removed `-Force -AllowClobber`, removed hardcoded ClientId, environment variable cleanup
-- **No more side effects on import** - Dependencies checked at connect time, not module import
-- **Sovereign cloud support** - SharePoint URL validation now accepts `.sharepoint.us`, `.sharepoint.de`, `.sharepoint.cn`
-- **Get-CISM365BenchmarkControl** fully populated with all 140 controls
-- **Teams connection non-fatal** - If Teams fails to connect, remaining 8 sections still run
-
-**v3.0.5 - Fix False Positive on onmicrosoft.com Domains (Issue #9)**
-- DMARC, SPF, and DKIM checks skip `*.onmicrosoft.com` domains managed by Microsoft
+**v5.0.0 - 95% Automation, MSAL Auth, Fabric API & Theme Toggle**
+- **95% Automation** - 133 of 140 controls now fully automated (up from 92)
+- **MSAL-based authentication** - Graph + SharePoint tokens acquired at connect time, fewer login prompts
+- **Eliminated SharePoint Online module** - Replaced with direct CSOM REST API calls, zero PS 7+ compatibility issues
+- **All 12 Power BI/Fabric controls automated** - Native Fabric Admin API integration via MSAL token
+- **Security & Compliance Center integration** - Purview DLP and retention checks automated via `Connect-IPPSSession`
+- **MSAL assembly conflict solved** - Isolated subprocess for Fabric token acquisition
+- **Light/Dark theme toggle** - HTML report now includes a theme switcher with localStorage persistence
+- **Fixed 6 incorrect Fabric API settingName values** - Added title fallback for robustness
+- **Automated 7.2.8** - External sharing restricted by security group check
+- **80% fewer API calls** - Intelligent caching across all sections
+- **MSOnline module fully retired** - 100% Microsoft Graph API
+- **Print override** - HTML reports force light theme when printing
 
 ## Features
 
 - **140 Compliance Controls** across all M365 services
-- **66% Fully Automated** - 92 controls run automatically via Microsoft Graph API
-- **Zero-Parameter Authentication** - `Connect-CISM365Benchmark` for easy setup
+- **95% Fully Automated** - 133 controls run automatically via Microsoft Graph API and native REST APIs
+- **Light/Dark Theme Toggle** - HTML reports with switchable themes and print-friendly output
+- **Zero-Parameter Authentication** - `Connect-CISM365Benchmark` with MSAL-based token management
 - **Dual Report Format** - Professional HTML and CSV reports with floating action buttons
 - **Profile-based Filtering** - Check L1, L2, or All controls
-- **Secure Authentication** - Modern OAuth 2.0 with persistent token caching
+- **Secure Authentication** - Modern OAuth 2.0 with MSAL token caching
 - **Read-Only Assessment** - No changes to your environment
 - **Actionable Remediation** - Each failed check includes specific remediation steps
 - **PowerShell 5.1 & 7+ Compatible** - Works on Windows PowerShell and PowerShell Core
-- **Cached API Calls** - Minimized redundant Microsoft Graph and service calls
+- **Cached API Calls** - 80% fewer API calls with intelligent caching
 
 ## Automation Coverage
 
 | Category | Total Controls | Automated | Manual | Coverage |
 |----------|---------------|-----------|--------|----------|
-| **Section 1: M365 Admin** | 15 | 5 | 10 | 33% |
-| **Section 2: M365 Defender** | 20 | 15 | 5 | 75% |
-| **Section 3: Purview** | 4 | 3 | 1 | 75% |
+| **Section 1: M365 Admin** | 15 | 13 | 2 | 87% |
+| **Section 2: M365 Defender** | 20 | 18 | 2 | 90% |
+| **Section 3: Purview** | 4 | 4 | 0 | 100% |
 | **Section 4: Intune** | 2 | 2 | 0 | 100% |
-| **Section 5: Entra ID** | 45 | 27 | 18 | 60% |
-| **Section 6: Exchange** | 12 | 11 | 1 | 92% |
+| **Section 5: Entra ID** | 45 | 43 | 2 | 96% |
+| **Section 6: Exchange** | 12 | 12 | 0 | 100% |
 | **Section 7: SharePoint** | 13 | 12 | 1 | 92% |
 | **Section 8: Teams** | 17 | 17 | 0 | 100% |
-| **Section 9: Power BI** | 12 | 0 | 12 | 0% |
-| **TOTAL** | **140** | **92** | **48** | **66%** |
+| **Section 9: Power BI** | 12 | 12 | 0 | 100% |
+| **TOTAL** | **140** | **133** | **7** | **95%** |
 
 ## Installation
 
@@ -86,9 +74,10 @@ The following modules are **automatically installed** when you first use the mod
 | Module | Purpose |
 |--------|---------|
 | `Microsoft.Graph` (v2.0+) | Entra ID, Conditional Access, PIM, Authentication Methods |
-| `ExchangeOnlineManagement` | Exchange Online configuration checks |
-| `Microsoft.Online.SharePoint.PowerShell` | SharePoint Online tenant settings |
+| `ExchangeOnlineManagement` (v3.1+) | Exchange Online configuration checks |
 | `MicrosoftTeams` | Teams meeting, messaging, and federation policies |
+
+> **Note**: SharePoint Online checks now use direct CSOM REST API calls — no separate SPO module required.
 
 ### Required Permissions
 
@@ -164,8 +153,10 @@ Get-CISM365BenchmarkInfo
 
 ### HTML Report
 - **File**: `CIS-M365-Compliance-Report_YYYYMMDD_HHMMSS.html`
-- Professional dark-themed report with summary dashboard, progress bars, and L1/L2 breakdown
+- Professional report with **light/dark theme toggle** (preference saved to localStorage)
+- Summary dashboard with progress bars, L1/L2 breakdown, and compliance statistics
 - Filterable results table with search, remediation steps for each failed control
+- Print-friendly output (automatically forces light theme)
 
 ### CSV Report
 - **File**: `CIS-M365-Compliance-Report_YYYYMMDD_HHMMSS.csv`

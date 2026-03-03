@@ -25,7 +25,6 @@ AliasesToExport = @()
 FileList = @(
     'CIS-M365-Benchmark.psm1',
     'CIS-M365-Compliance-Checker.ps1',
-    'README.md',
     'LICENSE'
 )
 

@@ -4661,24 +4661,111 @@ function Export-HtmlReport {
 
     $html = @"
 <!DOCTYPE html>
-<html>
+<html data-theme="dark">
 <head>
     <title>CIS Microsoft 365 Compliance Report</title>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
+        /* =========================================================
+           CSS VARIABLES - THEME DEFINITIONS
+           ========================================================= */
+        :root {
+            /* Status Colors (shared across themes) */
+            --color-pass: #4ade80;
+            --color-fail: #f87171;
+            --color-warning: #fbbf24;
+            --color-info: #93c5fd;
+            --color-l2: #c4b5fd;
+            --color-progress: #22c55e;
+
+            /* Font */
+            --font-sans: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+
+            /* Transitions */
+            --transition-speed: 0.3s;
+        }
+
+        /* LIGHT THEME */
+        [data-theme="light"] {
+            --bg-primary: #f8fafc;
+            --bg-secondary: #ffffff;
+            --bg-tertiary: #f1f5f9;
+            --bg-header: linear-gradient(135deg, #0f172a 0%, #1e3a5f 50%, #1e40af 100%);
+            --text-primary: #0f172a;
+            --text-secondary: #475569;
+            --text-muted: #64748b;
+            --text-header: #ffffff;
+            --accent: #2563eb;
+            --accent-light: #3b82f6;
+            --border-color: #e2e8f0;
+            --border-subtle: #f1f5f9;
+            --shadow-sm: 0 1px 2px rgba(0,0,0,0.04);
+            --shadow-md: 0 2px 8px rgba(0,0,0,0.06);
+            --shadow-lg: 0 8px 30px rgba(0,0,0,0.08);
+            --hover-bg: #f1f5f9;
+            --input-bg: #ffffff;
+            --input-border: #d1d5db;
+            --detail-bg: #f8fafc;
+            --detail-border: #e2e8f0;
+            --summary-box-bg: #ffffff;
+            --summary-box-border: #e2e8f0;
+            --tooltip-bg: #0f172a;
+            --tooltip-text: #f1f5f9;
+            --tooltip-border: #334155;
+        }
+
+        /* DARK THEME */
+        [data-theme="dark"] {
+            --bg-primary: #0a0a0c;
+            --bg-secondary: #18181b;
+            --bg-tertiary: #27272a;
+            --bg-header: #18181b;
+            --text-primary: #e4e4e7;
+            --text-secondary: #a1a1aa;
+            --text-muted: #71717a;
+            --text-header: #ffffff;
+            --accent: #60a5fa;
+            --accent-light: #93c5fd;
+            --border-color: #27272a;
+            --border-subtle: #2d3548;
+            --shadow-sm: 0 1px 2px rgba(0,0,0,0.2);
+            --shadow-md: 0 2px 8px rgba(0,0,0,0.3);
+            --shadow-lg: 0 4px 12px rgba(0,0,0,0.4);
+            --hover-bg: #27272a;
+            --input-bg: #27272a;
+            --input-border: #3f3f46;
+            --detail-bg: #1a1d2e;
+            --detail-border: #2d3548;
+            --summary-box-bg: #000000;
+            --summary-box-border: #ffffff;
+            --tooltip-bg: #18181b;
+            --tooltip-text: #e4e4e7;
+            --tooltip-border: #3f3f46;
+        }
+
+        /* =========================================================
+           BASE STYLES
+           ========================================================= */
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #0a0a0c; color: #e4e4e7; padding-top: 0; }
+        body {
+            font-family: var(--font-sans);
+            background-color: var(--bg-primary);
+            color: var(--text-primary);
+            padding-top: 0;
+            transition: background-color var(--transition-speed) ease, color var(--transition-speed) ease;
+        }
         .container { max-width: 1400px; margin: 0 auto; }
 
         /* Sticky Header */
         .header {
-            background: #18181b;
-            border-bottom: 3px solid #60a5fa;
+            background: var(--bg-header);
+            border-bottom: 3px solid var(--accent);
             position: sticky;
             top: 0;
             z-index: 1000;
-            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+            box-shadow: var(--shadow-md);
+            transition: background var(--transition-speed) ease, box-shadow var(--transition-speed) ease;
         }
         .header-container {
             max-width: 1400px;
@@ -4693,19 +4780,20 @@ function Export-HtmlReport {
             font-weight: 700;
             letter-spacing: -1px;
             margin: 0;
-            color: white;
+            color: var(--text-header);
         }
         .subtitle {
             font-size: 0.9em;
             opacity: 0.9;
             margin-top: 4px;
-            color: white;
+            color: var(--text-header);
         }
         .header-right {
             display: flex;
             align-items: center;
             justify-content: flex-end;
-            color: white;
+            gap: 12px;
+            color: var(--text-header);
             position: relative;
         }
 
@@ -4745,13 +4833,14 @@ function Export-HtmlReport {
             top: calc(100% + 10px);
             right: 0;
             width: 320px;
-            background: #1a1d2e;
-            border: 1px solid #2d3548;
+            background: var(--detail-bg);
+            border: 1px solid var(--detail-border);
             border-radius: 6px;
             padding: 8px 12px;
             animation: slideDown 0.3s ease;
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+            box-shadow: var(--shadow-lg);
             z-index: 1001;
+            transition: background var(--transition-speed) ease, border-color var(--transition-speed) ease;
         }
         .header-details-box.expanded {
             display: block;
@@ -4769,7 +4858,7 @@ function Export-HtmlReport {
         .detail-item {
             margin-bottom: 6px;
             padding-bottom: 6px;
-            border-bottom: 1px solid #2d3548;
+            border-bottom: 1px solid var(--detail-border);
         }
         .detail-item:last-child {
             margin-bottom: 0;
@@ -4778,21 +4867,96 @@ function Export-HtmlReport {
         }
         .detail-label {
             font-size: 0.8em;
-            color: white;
+            color: var(--text-header);
             font-weight: 600;
             margin-bottom: 2px;
         }
         .detail-value {
             font-size: 0.75em;
-            color: #9ca3af;
+            color: var(--text-secondary);
+        }
+        [data-theme="dark"] .detail-value { color: #9ca3af; }
+
+        /* Theme Toggle */
+        .theme-toggle {
+            position: relative;
+            width: 56px;
+            height: 30px;
+            background: rgba(255,255,255,0.12);
+            border: 1px solid rgba(255,255,255,0.18);
+            border-radius: 15px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            outline: none;
+            padding: 0;
+            flex-shrink: 0;
+        }
+        .theme-toggle:hover {
+            background: rgba(255,255,255,0.18);
+        }
+        .theme-toggle .toggle-thumb {
+            position: absolute;
+            top: 3px;
+            left: 3px;
+            width: 22px;
+            height: 22px;
+            border-radius: 50%;
+            background: #ffffff;
+            transition: all 0.3s cubic-bezier(0.68, -0.55, 0.265, 1.55);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        [data-theme="dark"] .theme-toggle .toggle-thumb {
+            left: 29px;
+            background: #334155;
+        }
+        .toggle-thumb::before {
+            content: '';
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #f59e0b;
+            transition: all 0.3s ease;
+        }
+        [data-theme="dark"] .toggle-thumb::before {
+            width: 10px;
+            height: 10px;
+            background: transparent;
+            border-radius: 50%;
+            box-shadow: inset -4px -2px 0 0 #fbbf24;
+        }
+        .toggle-thumb::after {
+            content: '';
+            position: absolute;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            border: 2px dashed rgba(245,158,11,0.4);
+            transition: all 0.3s ease;
+        }
+        [data-theme="dark"] .toggle-thumb::after {
+            border-color: transparent;
+            width: 0;
+            height: 0;
         }
 
         /* Content */
-        .content { padding: 10px 40px 20px 40px; }
-        h2 { color: white; margin-top: 30px; margin-bottom: 15px; }
+        .content {
+            padding: 10px 40px 20px 40px;
+            transition: background-color var(--transition-speed) ease;
+        }
+        h2 { color: var(--text-primary); margin-top: 30px; margin-bottom: 15px; transition: color var(--transition-speed) ease; }
         h2:first-child { margin-top: 0; margin-bottom: 10px; }
 
-        .summary { background: #18181b; padding: 12px 15px; border-radius: 8px; margin-bottom: 25px; border: 1px solid #27272a; }
+        .summary {
+            background: var(--bg-secondary);
+            padding: 12px 15px;
+            border-radius: 8px;
+            margin-bottom: 25px;
+            border: 1px solid var(--border-color);
+            transition: background var(--transition-speed) ease, border-color var(--transition-speed) ease;
+        }
 
         .summary-box {
             display: inline-block;
@@ -4801,26 +4965,31 @@ function Export-HtmlReport {
             border-radius: 5px;
             cursor: pointer;
             transition: all 0.3s ease;
-            background-color: #000000;
-            border: 2px solid #ffffff;
+            background-color: var(--summary-box-bg);
+            border: 2px solid var(--summary-box-border);
         }
         .summary-box:hover {
             transform: translateY(-2px);
-            box-shadow: 0 0 8px rgba(255, 255, 255, 0.5);
+            box-shadow: 0 0 8px rgba(96, 165, 250, 0.5);
         }
         .summary-box.active {
             box-shadow: 0 0 12px rgba(96, 165, 250, 0.8);
-            border: 2px solid #60a5fa !important;
+            border: 2px solid var(--accent) !important;
         }
-        .pass { color: #4ade80; }
-        .fail { color: #f87171; }
-        .manual { color: #fbbf24; }
-        .error { color: #f87171; }
-        .level-l1 { color: #93c5fd; }
-        .level-l2 { color: #c4b5fd; }
+        .pass { color: var(--color-pass); }
+        .fail { color: var(--color-fail); }
+        .manual { color: var(--color-warning); }
+        .error { color: var(--color-fail); }
+        .level-l1 { color: var(--color-info); }
+        .level-l2 { color: var(--color-l2); }
 
-        .progress-bar { width: 100%; height: 30px; background-color: #27272a; border-radius: 5px; overflow: hidden; margin: 15px 0; }
-        .progress-fill { height: 100%; background-color: #22c55e; text-align: center; line-height: 30px; color: white; font-weight: bold; }
+        .progress-bar {
+            width: 100%; height: 30px;
+            background-color: var(--bg-tertiary);
+            border-radius: 5px; overflow: hidden; margin: 15px 0;
+            transition: background-color var(--transition-speed) ease;
+        }
+        .progress-fill { height: 100%; background-color: var(--color-progress); text-align: center; line-height: 30px; color: white; font-weight: bold; }
 
         /* Search Box */
         .search-container {
@@ -4832,19 +5001,19 @@ function Export-HtmlReport {
             width: 100%;
             padding: 15px 50px 15px 20px;
             font-size: 16px;
-            background-color: #27272a;
-            border: 2px solid #3f3f46;
+            background-color: var(--input-bg);
+            border: 2px solid var(--input-border);
             border-radius: 8px;
-            color: #f4f4f5;
+            color: var(--text-primary);
             transition: all 0.3s ease;
             outline: none;
         }
         #searchBox:focus {
-            border-color: #60a5fa;
+            border-color: var(--accent);
             box-shadow: 0 0 10px rgba(96, 165, 250, 0.3);
         }
         #searchBox::placeholder {
-            color: #71717a;
+            color: var(--text-muted);
         }
         .search-icon {
             position: absolute;
@@ -4853,25 +5022,41 @@ function Export-HtmlReport {
             transform: translateY(-50%);
             font-size: 20px;
             pointer-events: none;
-            color: #71717a;
+            color: var(--text-muted);
         }
         .search-results {
             display: block;
             margin-top: 8px;
             font-size: 14px;
-            color: #a1a1aa;
+            color: var(--text-secondary);
         }
 
-        table { width: 100%; border-collapse: collapse; background: #18181b; border: 1px solid #27272a; margin-top: 20px; }
-        th { background-color: #18181b; color: white; padding: 12px; text-align: left; font-weight: 600; border-bottom: 2px solid #60a5fa; }
-        td { padding: 12px; border-bottom: 1px solid #27272a; }
-        tr:hover { background-color: #27272a; }
-        .status-pass { color: #4ade80; font-weight: bold; }
-        .status-fail { color: #f87171; font-weight: bold; }
-        .status-manual { color: #fbbf24; font-weight: bold; }
-        .status-error { color: #f87171; font-weight: bold; }
-        .details { font-size: 0.9em; color: #a1a1aa; }
-        .remediation { font-size: 0.85em; color: #60a5fa; font-style: italic; margin-top: 5px; }
+        table {
+            width: 100%; border-collapse: collapse;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            margin-top: 20px;
+            transition: background var(--transition-speed) ease, border-color var(--transition-speed) ease;
+        }
+        th {
+            background-color: var(--bg-secondary);
+            color: var(--text-primary);
+            padding: 12px; text-align: left; font-weight: 600;
+            border-bottom: 2px solid var(--accent);
+            transition: background-color var(--transition-speed) ease, color var(--transition-speed) ease;
+        }
+        td {
+            padding: 12px;
+            border-bottom: 1px solid var(--border-color);
+            transition: border-color var(--transition-speed) ease;
+        }
+        tr:hover { background-color: var(--hover-bg); }
+        .status-pass { color: var(--color-pass); font-weight: bold; }
+        .status-fail { color: var(--color-fail); font-weight: bold; }
+        .status-manual { color: var(--color-warning); font-weight: bold; }
+        .status-error { color: var(--color-fail); font-weight: bold; }
+        .details { font-size: 0.9em; color: var(--text-secondary); }
+        .remediation { font-size: 0.85em; color: var(--accent); font-style: italic; margin-top: 5px; }
 
         /* Floating Action Buttons (Right Side) */
         .floating-actions {
@@ -4889,7 +5074,7 @@ function Export-HtmlReport {
             height: 56px;
             border-radius: 50%;
             background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%);
-            border: 2px solid #60a5fa;
+            border: 2px solid var(--accent);
             display: flex;
             align-items: center;
             justify-content: center;
@@ -4905,14 +5090,14 @@ function Export-HtmlReport {
         .action-btn:hover {
             transform: scale(1.1);
             box-shadow: 0 8px 20px rgba(96, 165, 250, 0.4);
-            border-color: #93c5fd;
+            border-color: var(--accent-light);
         }
         .action-btn::before {
             content: attr(data-tooltip);
             position: absolute;
             right: 70px;
-            background: #18181b;
-            color: #e4e4e7;
+            background: var(--tooltip-bg);
+            color: var(--tooltip-text);
             padding: 8px 12px;
             border-radius: 6px;
             font-size: 14px;
@@ -4920,8 +5105,8 @@ function Export-HtmlReport {
             opacity: 0;
             pointer-events: none;
             transition: opacity 0.3s ease;
-            border: 1px solid #3f3f46;
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+            border: 1px solid var(--tooltip-border);
+            box-shadow: var(--shadow-lg);
         }
         .action-btn:hover::before {
             opacity: 1;
@@ -4929,20 +5114,34 @@ function Export-HtmlReport {
 
         /* Footer */
         .footer {
-            background: #18181b;
-            color: #a1a1aa;
+            background: var(--bg-secondary);
+            color: var(--text-secondary);
             padding: 10px 40px;
             text-align: center;
-            border-top: 1px solid #27272a;
+            border-top: 1px solid var(--border-color);
             margin-top: 40px;
             font-size: 0.9em;
+            transition: background var(--transition-speed) ease, color var(--transition-speed) ease, border-color var(--transition-speed) ease;
         }
         .footer p { margin: 0; }
-        .footer a { color: #60a5fa; text-decoration: none; }
+        .footer a { color: var(--accent); text-decoration: none; }
         .footer a:hover { text-decoration: underline; }
 
         /* Hidden class for filtering */
         .hidden { display: none !important; }
+
+        /* Print styles - force light theme */
+        @media print {
+            * { transition: none !important; animation: none !important; }
+            html, body { background: #ffffff !important; color: #0f172a !important; }
+            [data-theme="dark"] {
+                --bg-primary: #ffffff; --bg-secondary: #ffffff; --bg-tertiary: #f8fafc;
+                --text-primary: #0f172a; --text-secondary: #475569; --text-muted: #64748b;
+                --border-color: #e2e8f0; --detail-bg: #f8fafc; --detail-border: #e2e8f0;
+                --input-bg: #ffffff; --hover-bg: #f1f5f9;
+            }
+            .theme-toggle, .floating-actions { display: none !important; }
+        }
     </style>
 </head>
 <body>
@@ -4954,6 +5153,9 @@ function Export-HtmlReport {
                 <h1>CIS MICROSOFT 365 FOUNDATIONS BENCHMARK v6.0.0</h1>
             </div>
             <div class="header-right">
+                <button class="theme-toggle" id="themeToggle" title="Toggle dark/light mode" aria-label="Toggle theme">
+                    <span class="toggle-thumb"></span>
+                </button>
                 <div class="tenant-info" id="tenantInfo" onclick="toggleHeaderDetails()">
                     <span class="subtitle">$safeTenantDomain</span>
                     <span class="expand-icon" id="expandIcon"><svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M2 3.5L5 6.5L8 3.5" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
@@ -5094,6 +5296,26 @@ function Export-HtmlReport {
     </div>
 
     <script>
+        /* ===========================================================
+           THEME TOGGLE
+           =========================================================== */
+        var themeToggle = document.getElementById('themeToggle');
+        var savedTheme = null;
+        try { savedTheme = localStorage.getItem('cis-report-theme'); } catch(e) {}
+        if (savedTheme) {
+            document.documentElement.setAttribute('data-theme', savedTheme);
+        }
+
+        themeToggle.addEventListener('click', function() {
+            var current = document.documentElement.getAttribute('data-theme');
+            var next = current === 'dark' ? 'light' : 'dark';
+            document.documentElement.setAttribute('data-theme', next);
+            try { localStorage.setItem('cis-report-theme', next); } catch(e) {}
+        });
+
+        /* ===========================================================
+           HEADER & FILTERING
+           =========================================================== */
         let activeFilter = null;
 
         function toggleHeaderDetails() {
