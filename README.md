@@ -10,21 +10,28 @@
 
 A comprehensive PowerShell module that audits your Microsoft 365 environment against **all 140 CIS Microsoft 365 Foundations Benchmark v6.0.0 controls** and generates detailed HTML and CSV compliance reports.
 
-## What's New in v5.0.0
+## What's New in v5.1.0
 
-**v5.0.0 - 95% Automation, MSAL Auth, Fabric API & Theme Toggle**
+**v5.1.0 - ExcludeSections, Disconnect, Scope Fixes & Sorting**
+- **`-ExcludeSections` parameter** - Skip sections like Intune, Teams, or PowerBI (great for hybrid environments)
+- **`Disconnect-CISM365Benchmark`** - Cleanly disconnect all M365 sessions (Graph, Exchange, SPO, Teams, IPPS)
+- **Fixed controls 1.3.4 & 1.3.5** - Added missing `OrgSettings-AppsAndServices.Read.All` and `OrgSettings-Forms.Read.All` Graph scopes
+- **Fixed report sorting** - Controls like 9.1.10 now sort correctly after 9.1.9 (not before 9.1.2)
+- **Version alignment** - All files now consistently report v5.1.0
+
+<details>
+<summary><strong>v5.0.0 - 95% Automation, MSAL Auth, Fabric API & Theme Toggle</strong></summary>
+
 - **95% Automation** - 133 of 140 controls now fully automated (up from 92)
 - **MSAL-based authentication** - Graph + SharePoint tokens acquired at connect time, fewer login prompts
-- **Eliminated SharePoint Online module** - Replaced with direct CSOM REST API calls, zero PS 7+ compatibility issues
 - **All 12 Power BI/Fabric controls automated** - Native Fabric Admin API integration via MSAL token
 - **Security & Compliance Center integration** - Purview DLP and retention checks automated via `Connect-IPPSSession`
 - **MSAL assembly conflict solved** - Isolated subprocess for Fabric token acquisition
 - **Light/Dark theme toggle** - HTML report now includes a theme switcher with localStorage persistence
-- **Fixed 6 incorrect Fabric API settingName values** - Added title fallback for robustness
-- **Automated 7.2.8** - External sharing restricted by security group check
 - **80% fewer API calls** - Intelligent caching across all sections
 - **MSOnline module fully retired** - 100% Microsoft Graph API
 - **Print override** - HTML reports force light theme when printing
+</details>
 
 ## Features
 
@@ -75,9 +82,8 @@ The following modules are **automatically installed** when you first use the mod
 |--------|---------|
 | `Microsoft.Graph` (v2.0+) | Entra ID, Conditional Access, PIM, Authentication Methods |
 | `ExchangeOnlineManagement` (v3.1+) | Exchange Online configuration checks |
+| `Microsoft.Online.SharePoint.PowerShell` | SharePoint Online tenant configuration checks |
 | `MicrosoftTeams` | Teams meeting, messaging, and federation policies |
-
-> **Note**: SharePoint Online checks now use direct CSOM REST API calls — no separate SPO module required.
 
 ### Required Permissions
 
@@ -97,6 +103,8 @@ Your account needs the following permissions:
 - `Reports.Read.All`
 - `DeviceManagementConfiguration.Read.All`
 - `DeviceManagementServiceConfig.Read.All`
+- `OrgSettings-AppsAndServices.Read.All`
+- `OrgSettings-Forms.Read.All`
 
 **Exchange Online:**
 - View-Only Organization Management or higher
@@ -124,6 +132,10 @@ Invoke-CISM365Benchmark `
 Invoke-CISM365Benchmark -ProfileLevel "L1"
 Invoke-CISM365Benchmark -ProfileLevel "L2"
 
+# Exclude specific sections (useful for hybrid environments)
+Invoke-CISM365Benchmark -ExcludeSections Intune
+Invoke-CISM365Benchmark -ExcludeSections Intune, Teams, PowerBI
+
 # Custom output directory
 Invoke-CISM365Benchmark -OutputPath "C:\CIS-Reports"
 
@@ -137,7 +149,11 @@ Invoke-CISM365Benchmark `
     -SharePointAdminUrl "https://contoso-admin.sharepoint.com" `
     -ProfileLevel "All" `
     -OutputPath "C:\Security\CIS-Reports" `
+    -ExcludeSections Intune `
     -Verbose
+
+# Disconnect all M365 sessions when done
+Disconnect-CISM365Benchmark
 
 # Look up a specific control
 Get-CISM365BenchmarkControl -ControlNumber "5.2.2.1"
@@ -148,6 +164,20 @@ Test-CISM365BenchmarkPrerequisites
 # Module info
 Get-CISM365BenchmarkInfo
 ```
+
+### Available ExcludeSections Values
+
+| Value | Section |
+|-------|---------|
+| `AdminCenter` | Section 1: Microsoft 365 Admin Center |
+| `Defender` | Section 2: Microsoft 365 Defender |
+| `Purview` | Section 3: Microsoft Purview |
+| `Intune` | Section 4: Microsoft Intune |
+| `EntraID` | Section 5: Microsoft Entra ID |
+| `Exchange` | Section 6: Exchange Online |
+| `SharePoint` | Section 7: SharePoint Online |
+| `Teams` | Section 8: Microsoft Teams |
+| `PowerBI` | Section 9: Power BI |
 
 ## Output Reports
 
@@ -214,7 +244,7 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## Acknowledgments
 
-- Thanks to ITEngineer-0815, M0nk3yOo, ozsaid, boscorelly, and Mateusz Jagiello for their contributions and issue reports
+- Thanks to ITEngineer-0815, M0nk3yOo, ozsaid, boscorelly, Josip-I, albert-widjaja, valhalla94, and Mateusz Jagiello for their contributions and issue reports
 - Special Thanks to **Mateusz Jagiello** For his relentless checks.
 
 ## Support
