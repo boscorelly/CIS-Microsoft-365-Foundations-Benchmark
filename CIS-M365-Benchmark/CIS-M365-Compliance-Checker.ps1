@@ -4161,7 +4161,7 @@ function Test-MicrosoftTeams {
         $tenantFedConfig = $cachedTenantFedConfig
 
         # AllowPublicUsers can be $true, $false, or $null (empty = not configured = disabled)
-        if ($tenantFedConfig.AllowPublicUsers -eq $true) {
+        if ($tenantFedConfig.AllowPublicUsers -ne $true) {
             Add-Result -ControlNumber "8.2.4" -ControlTitle "Ensure communication with Skype users is disabled" `
                        -ProfileLevel "L1" -Result "Pass" -Details "Skype federation disabled (AllowPublicUsers: $($tenantFedConfig.AllowPublicUsers))"
         }
